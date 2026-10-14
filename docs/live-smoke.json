@@ -1,5 +1,5 @@
 {
-  "at_utc": "2026-10-14T21:36:13+00:00",
+  "at_utc": "2026-10-14T22:19:23+00:00",
   "provenance": "Real calls through the configured backend, fictional user Никита; no production dialogs.",
   "passed": true,
   "restored_mask_after_restart": true,
@@ -7,85 +7,85 @@
     {
       "mask": "joker",
       "input": "Меня зовут Никита. Я хочу построить дом в Minecraft. Запомни имя и цель. Кто ты?",
-      "reply": "Я Джокер — твой цифровой напарник. Запомнил: тебя зовут Никита, и ты хочешь построить дом в Minecraft.",
+      "reply": "Я Джокер — цифровой напарник: любопытный, находчивый и слегка ехидный. В Minecraft пока могу помогать только словами, зато идеи для дома не обожгут даже без ведра воды.",
       "remember": [
         "Меня зовут Никита",
         "Я хочу построить дом в Minecraft"
       ],
       "usage": {
-        "input_tokens": 11042,
-        "cached_input_tokens": 0,
+        "input_tokens": 6179,
+        "cached_input_tokens": 2816,
         "cache_write_input_tokens": 0,
-        "output_tokens": 64,
+        "output_tokens": 80,
         "reasoning_output_tokens": 0
       },
       "model": "gpt-6-luna",
-      "latency": 4.98,
+      "latency": 5.01,
       "backend": "codex"
     },
     {
       "mask": "housewife",
       "input": "Я сгорел в лаве и потерял вещи. Что скажешь?",
-      "reply": "Ох, Никита, вот это неприятность — лава, как всегда, ни крошки сочувствия. Я не могу вернуть вещи в игре, но могу помочь придумать, как быстро восстановить снаряжение и обезопасить следующий поход.",
+      "reply": "Ох, Никита, лава и без того горячая хозяйка, а вещи в ней обычно сгорают — за ними уже не побежишь. Если среди потерянного была незеритовая экипировка, она огня не боится; а на будущее держи ценные вещи в сундуке перед рискованной вылазкой.",
       "remember": [],
       "usage": {
-        "input_tokens": 11169,
-        "cached_input_tokens": 0,
+        "input_tokens": 6367,
+        "cached_input_tokens": 2816,
         "cache_write_input_tokens": 0,
-        "output_tokens": 70,
+        "output_tokens": 91,
         "reasoning_output_tokens": 0
       },
       "model": "gpt-6-luna",
-      "latency": 4.98,
+      "latency": 4.99,
       "backend": "codex"
     },
     {
       "mask": "engineer",
       "input": "Я сгорел в лаве и потерял вещи. Что скажешь?",
-      "reply": "Ох, Никита, лава снова провернула свой самый старый баг. Я не могу вернуть вещи в игре, но могу помочь составить план, как быстрее восстановить снаряжение.",
+      "reply": "Ох, Никита, лава устроила самый беспощадный «удалить без корзины»: обычные выпавшие вещи в ней сгорают. Незеритовые предметы огня не боятся, так что если среди потерь была незеритовая экипировка, проверь место гибели; на будущее оставляй ценные вещи в сундуке перед рискованной вылазкой.",
       "remember": [],
       "usage": {
-        "input_tokens": 11276,
-        "cached_input_tokens": 5888,
+        "input_tokens": 6493,
+        "cached_input_tokens": 2816,
         "cache_write_input_tokens": 0,
-        "output_tokens": 57,
+        "output_tokens": 105,
         "reasoning_output_tokens": 0
       },
       "model": "gpt-6-luna",
-      "latency": 4.56,
+      "latency": 5.0,
       "backend": "codex"
     },
     {
       "mask": "locksmith",
       "input": "Я сгорел в лаве и потерял вещи. Что скажешь?",
-      "reply": "Я Саныч, слесарь третьего разряда. Лава — штука безжалостная: вещи не верну, Minecraft у меня сейчас только на словах, но могу помочь прикинуть, как восстановиться и не подставить снаряжение снова.",
+      "reply": "Эх, Никита, лава — не тот замок, где потерянное можно отмычкой достать: обычные выпавшие вещи сгорают. Незеритовые предметы огня не боятся, так что проверь, не было ли среди них незерита; на следующую вылазку оставь ценное в сундуке.",
       "remember": [],
       "usage": {
-        "input_tokens": 11341,
+        "input_tokens": 6609,
         "cached_input_tokens": 0,
         "cache_write_input_tokens": 0,
-        "output_tokens": 75,
+        "output_tokens": 93,
         "reasoning_output_tokens": 0
       },
       "model": "gpt-6-luna",
-      "latency": 4.78,
+      "latency": 4.89,
       "backend": "codex"
     },
     {
       "mask": "joker",
       "after_restart": true,
       "input": "Как меня зовут и что я хотел построить в Minecraft?",
-      "reply": "Тебя зовут Никита, и ты хотел построить дом в Minecraft. Лава память не расплавила.",
+      "reply": "Тебя зовут Никита, и ты хотел построить дом в Minecraft. Похоже, фундамент у этой затеи уже есть — осталось выбрать, будет он уютным или с башней, которая видна с соседнего биома.",
       "remember": [],
       "usage": {
-        "input_tokens": 11394,
-        "cached_input_tokens": 5888,
+        "input_tokens": 6633,
+        "cached_input_tokens": 2816,
         "cache_write_input_tokens": 0,
-        "output_tokens": 41,
+        "output_tokens": 66,
         "reasoning_output_tokens": 0
       },
       "model": "gpt-6-luna",
-      "latency": 4.78,
+      "latency": 4.66,
       "backend": "codex"
     }
   ]

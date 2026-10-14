@@ -1,4 +1,5 @@
 import json
+import io
 import re
 import shutil
 import subprocess
@@ -15,7 +16,7 @@ from joker.config import ROOT, Settings
 from joker.core import App
 from joker.panel import make_server
 from joker.store import Store
-from joker.telegram_bot import TelegramRunner
+from joker.telegram_bot import TelegramAPI, TelegramError, TelegramRunner
 
 
 class FakeBackend:
@@ -232,19 +233,219 @@ class RuntimeTests(unittest.TestCase):
         process.communicate.return_value = ("\n".join(json.dumps(e) for e in events), "")
         self.settings.codex_bin = "codex"
         with patch("joker.backends.subprocess.Popen", return_value=process) as launch, \
-                patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "private-test-value", "OPENAI_API_KEY": "private-api-value"}):
-            result = CodexBackend(self.settings).generate("роль", [{"role": "user", "content": "привет"}], threading.Event())
+                patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "private-test-value", "OPENAI_API_KEY": "private-api-value",
+                                          "AWS_SESSION_TOKEN": "private-aws-value", "CUSTOM_DATABASE_PASSWORD": "private-db-value",
+                                          "OPENAI_BASE_URL": "https://example.invalid/"}):
+            result = CodexBackend(self.settings).generate("роль; приватный факт персонажа", [{"role": "user", "content": "привет"}], threading.Event())
         command = launch.call_args.args[0]
         self.assertIn("features.shell_tool=false", command)
         self.assertIn("features.plugins=false", command)
         self.assertIn("--ignore-user-config", command)
         self.assertNotIn("TELEGRAM_BOT_TOKEN", launch.call_args.kwargs["env"])
         self.assertNotIn("OPENAI_API_KEY", launch.call_args.kwargs["env"])
+        self.assertNotIn("AWS_SESSION_TOKEN", launch.call_args.kwargs["env"])
+        self.assertNotIn("CUSTOM_DATABASE_PASSWORD", launch.call_args.kwargs["env"])
+        self.assertNotIn("OPENAI_BASE_URL", launch.call_args.kwargs["env"])
+        self.assertIn("skills.max_context_tokens=1", command)
+        self.assertTrue(any(c.startswith('model_instructions_file=') for c in command))
+        self.assertNotIn("приватный факт персонажа", " ".join(command))
         self.assertEqual(result["usage"]["input_tokens"], 10)
 
     def test_malformed_model_reply_is_not_sent_as_text(self):
         with self.assertRaises(ModelError):
             parse_answer("не JSON")
+
+    def test_invalid_message_types_are_validation_errors(self):
+        for text in (None, 42, [], {}, " ", "x" * 4001):
+            with self.subTest(text_type=type(text).__name__), self.assertRaises(ValueError):
+                self.app.handle(text)
+        self.assertEqual(self.backend.calls, 0)
+
+    def test_stop_cancels_a_panel_request_waiting_for_generation(self):
+        entered = threading.Event()
+        gate = threading.Lock()
+        gate.acquire()
+
+        class WaitingLock:
+            def __enter__(self):
+                entered.set()
+                gate.acquire()
+            def __exit__(self, *_):
+                gate.release()
+
+        self.app.generation = WaitingLock()
+        errors = []
+        def run():
+            try:
+                self.app.reply("Запрос в очереди панели")
+            except Cancelled:
+                errors.append("cancelled")
+        thread = threading.Thread(target=run)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(3))
+            self.app.stop()
+        finally:
+            gate.release()
+            thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, ["cancelled"])
+        self.assertEqual(self.backend.calls, 0)
+
+    def test_switch_cancels_telegram_requests_from_previous_mask(self):
+        api = FakeTelegram()
+        runner = TelegramRunner(self.app, api)
+        runner.accept(self.update(1, "Первый вопрос"))
+        runner.accept(self.update(2, "Второй вопрос"))
+        self.app.switch("engineer")
+        runner.work_once()
+        self.assertEqual(self.backend.calls, 0)
+        self.assertEqual(len(self.app.store.jobs("cancelled")), 2)
+        self.assertFalse(api.sent)
+
+    def test_error_from_cancelled_telegram_generation_is_not_delivered(self):
+        api = FakeTelegram()
+        runner = TelegramRunner(self.app, api)
+        runner.accept(self.update(1, "Привет"))
+        def fail(*_):
+            self.app.stop()
+            raise ModelError("Сервис недоступен")
+        self.backend.generate = fail
+        runner.work_once()
+        self.assertFalse(api.sent)
+        self.assertEqual(len(self.app.store.jobs("cancelled")), 1)
+
+    def test_outsider_spam_only_advances_offset_without_storing_rows(self):
+        runner = TelegramRunner(self.app, FakeTelegram())
+        for number in range(1, 101):
+            runner.accept(self.update(number, "spam", sender=999))
+        self.assertEqual(self.app.store.get("telegram_offset"), 101)
+        self.assertEqual(self.app.store.db.execute("SELECT count(*) FROM telegram_jobs").fetchone()[0], 0)
+
+    def test_codex_non_object_event_is_a_sanitized_error(self):
+        process = Mock(returncode=0)
+        process.communicate.return_value = ('[]\n', '')
+        self.settings.codex_bin = "codex"
+        with patch("joker.backends.subprocess.Popen", return_value=process), self.assertRaises(ModelError):
+            CodexBackend(self.settings).generate("роль", [], threading.Event())
+
+    def test_model_memory_has_a_bounded_validated_structure(self):
+        for facts in (["x"] * 4, [None], ["x" * 301], "fact", {}):
+            with self.subTest(facts=facts), self.assertRaises(ModelError):
+                parse_answer(json.dumps({"reply": "Привет", "remember": facts}))
+
+    def test_telegram_whitespace_message_does_not_kill_polling(self):
+        api = FakeTelegram()
+        runner = TelegramRunner(self.app, api)
+        runner.accept(self.update(1, "   "))
+        runner.work_once()
+        self.assertEqual(len(api.sent), 1)
+        self.assertEqual(self.backend.calls, 0)
+
+    def test_telegram_malformed_api_response_is_sanitized(self):
+        for value in ([], {}, {"ok": True}):
+            with self.subTest(value=value), patch("joker.telegram_bot.urllib.request.urlopen",
+                    return_value=io.BytesIO(json.dumps(value).encode())), self.assertRaises(TelegramError):
+                TelegramAPI("test-fixture").call("getMe")
+
+    def test_optional_typing_hint_failure_does_not_lose_request(self):
+        api = FakeTelegram()
+        api.call = Mock(side_effect=TelegramError("No network"))
+        runner = TelegramRunner(self.app, api)
+        runner.accept(self.update(1, "Привет"))
+        runner.work_once()
+        self.assertEqual(self.backend.calls, 1)
+        self.assertEqual(len(self.app.store.jobs("sent")), 1)
+
+    def test_worker_failure_is_visible_without_logging_private_details(self):
+        runner = TelegramRunner(self.app, FakeTelegram())
+        runner.work_once = Mock(side_effect=RuntimeError("private-test-message"))
+        with patch("builtins.print") as log:
+            runner.worker()
+        self.assertTrue(runner.shutdown.is_set())
+        self.assertEqual(self.app.status()["telegram"]["state"], "failed")
+        self.assertNotIn("private-test-message", str(log.call_args_list))
+
+    def test_panel_malformed_json_origin_host_and_csp(self):
+        server = make_server(self.app, port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            with urllib.request.urlopen(base) as response:
+                page = response.read().decode()
+                csp = response.headers["Content-Security-Policy"]
+            key = re.search(r'const key="([^"]+)"', page)[1]
+            self.assertIn("script-src 'nonce-" + key + "'", csp)
+            self.assertIn('<script nonce="' + key + '">', page)
+            for body in (b'[]', b'{"text":42}', b'{"text":null}', b'{"text":{}}', b'broken-json'):
+                request = urllib.request.Request(base + "/api/chat", data=body,
+                    headers={"X-Joker-Key": key, "Content-Type": "application/json"})
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(request)
+                self.assertEqual(error.exception.code, 400)
+            for headers in ({"Origin": "https://example.invalid"}, {"Host": "attacker.invalid"}, {"X-Joker-Key": "é"}):
+                request = urllib.request.Request(base + "/api/stop", data=b'{}',
+                    headers={"X-Joker-Key": key, **headers})
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(request)
+                self.assertEqual(error.exception.code, 403)
+            with urllib.request.urlopen(base + "/api/status") as response:
+                self.assertEqual(json.load(response)["mask"], "joker")
+            self.assertEqual(self.backend.calls, 0)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(3)
+
+    def test_panel_queue_is_bounded_and_stop_remains_available(self):
+        started, release = threading.Event(), threading.Event()
+        def slow(*args):
+            started.set()
+            release.wait(5)
+            return FakeBackend.generate(self.backend, *args)
+        self.backend.generate = slow
+        server = make_server(self.app, port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        clients, results = [], []
+        try:
+            with urllib.request.urlopen(base) as response:
+                key = re.search(r'const key="([^"]+)"', response.read().decode())[1]
+            def post(path, body):
+                request = urllib.request.Request(base + path, data=json.dumps(body).encode(),
+                    headers={"X-Joker-Key": key, "Content-Type": "application/json"})
+                try:
+                    with urllib.request.urlopen(request, timeout=6) as response:
+                        results.append(response.status)
+                except urllib.error.HTTPError as error:
+                    results.append(error.code)
+            # Five concurrent requests: one running, three waiting, one rejected.
+            for _ in range(5):
+                client = threading.Thread(target=post, args=("/api/chat", {"text": "Привет"}))
+                clients.append(client)
+                client.start()
+            self.assertTrue(started.wait(3))
+            import time
+            deadline = time.monotonic() + 3
+            while 429 not in results and time.monotonic() < deadline:
+                threading.Event().wait(0.01)
+            self.assertIn(429, results)
+            post("/api/stop", {})
+            release.set()
+            for client in clients:
+                client.join(6)
+                self.assertFalse(client.is_alive())
+            self.assertEqual(self.backend.calls, 1)
+            self.assertEqual(results.count(200), 5)
+        finally:
+            release.set()
+            for client in clients:
+                client.join(6)
+            server.shutdown()
+            server.server_close()
+            thread.join(3)
 
 
 if __name__ == "__main__":

@@ -25,10 +25,10 @@ class TelegramAPI:
         try:
             with urllib.request.urlopen(request, timeout=35) as response:
                 data = json.load(response)
-        except (urllib.error.URLError, ValueError, TimeoutError):
+        except (urllib.error.URLError, ValueError, OSError):
             # urllib exceptions contain the token-bearing URL; never log their repr.
             raise TelegramError("Telegram недоступен или отклонил запрос. Проверьте токен и соединение.") from None
-        if not data.get("ok"):
+        if not isinstance(data, dict) or not data.get("ok") or "result" not in data:
             raise TelegramError("Telegram не подтвердил выполнение запроса.")
         return data["result"]
 
@@ -68,23 +68,30 @@ class TelegramRunner:
         self.api = api or TelegramAPI(app.settings.telegram_token)
         self.shutdown = threading.Event()
         self.delivery_lock = threading.RLock()
+        self.app.telegram_status = {"state": "connecting", "detail": "Подключение Telegram"}
+
+    def state(self, state, detail):
+        self.app.telegram_status = {"state": state, "detail": detail}
 
     def accept(self, update):
         chat, sender, text, callback_id = message_from_update(update)
         update_id = update["update_id"]
-        if callback_id:
-            self.api.call("answerCallbackQuery", callback_query_id=callback_id)
         if (chat.get("type") != "private" or sender.get("is_bot")
                 or sender.get("id") != self.app.settings.owner_id or not text):
             self.app.store.accept_update(update_id, chat.get("id", 0), "", "ignored")
             return
+        if callback_id:
+            self.api.call("answerCallbackQuery", callback_query_id=callback_id)
         with self.delivery_lock:
             if not self.app.store.accept_update(update_id, chat["id"], text):
                 return
             if len(text) > 4000:
                 result = "Сообщение слишком длинное: до 4000 символов."
             else:
-                result = self.app.command(text)
+                try:
+                    result = self.app.command(text)
+                except ValueError as exc:
+                    result = str(exc)
             if result is not None:
                 self.app.store.job_status(update_id, "ready", result)
 
@@ -97,13 +104,17 @@ class TelegramRunner:
         if jobs:
             job = jobs[0]
             try:
+                self.api.call("sendChatAction", chat_id=job["chat_id"], action="typing")
+            except TelegramError:
+                pass  # This hint is optional; it must never strand a running job.
+            try:
                 result = self.app.reply(job["text"], expected_revision=revision)
                 with self.delivery_lock:
                     self.app.store.job_status(job["update_id"], "ready", result["reply"], revision=result["_revision"])
             except Cancelled:
                 self.app.store.job_status(job["update_id"], "cancelled")
             except (ModelError, ValueError) as exc:
-                self.app.store.job_status(job["update_id"], "ready", str(exc), type(exc).__name__)
+                self.app.store.job_status(job["update_id"], "ready", str(exc), type(exc).__name__, revision=revision)
         self.deliver()
 
     def deliver(self):
@@ -122,15 +133,31 @@ class TelegramRunner:
             except TelegramError:
                 print("Telegram: доставка отложена, повтор через 5 секунд.", flush=True)
                 self.shutdown.wait(5)
+            except Exception as exc:
+                # A dead worker must be visible; never log exception details with user data.
+                self.state("failed", "Обработчик Telegram остановлен; требуется перезапуск")
+                print(f"Telegram: обработчик остановлен ({type(exc).__name__}).", flush=True)
+                self.shutdown.set()
             self.shutdown.wait(0.2)
 
     def run(self):
         if not self.app.settings.owner_id:
             raise TelegramError("Сначала выполните python -m joker pair и задайте TELEGRAM_OWNER_ID.")
-        info = self.api.call("getMe")
-        if self.api.call("getWebhookInfo").get("url"):
+        while not self.shutdown.is_set():
+            try:
+                info = self.api.call("getMe")
+                webhook = self.api.call("getWebhookInfo")
+                break
+            except TelegramError:
+                self.state("retrying", "Нет связи с Telegram; повтор через 5 секунд")
+                self.shutdown.wait(5)
+        else:
+            return
+        if webhook.get("url"):
+            self.state("failed", "У бота настроен webhook; polling не запущен")
             raise TelegramError("У бота настроен webhook. Выберите отдельного бота или отключите его самостоятельно.")
         print(f"Telegram подключён: @{info['username']}; доступ только владельцу.", flush=True)
+        self.state("connected", "@" + info["username"])
         self.app.store.recover_jobs()
         thread = threading.Thread(target=self.worker, daemon=True)
         thread.start()
@@ -139,16 +166,22 @@ class TelegramRunner:
                 try:
                     updates = self.api.call("getUpdates", offset=self.app.store.get("telegram_offset", 0),
                                             timeout=20, allowed_updates=["message", "callback_query"])
+                    if self.shutdown.is_set():
+                        break
                     for update in updates:
                         self.accept(update)
                     self.deliver()
+                    self.state("connected", "@" + info["username"])
                 except TelegramError:
+                    self.state("retrying", "Нет связи с Telegram; повтор через 5 секунд")
                     print("Telegram: соединение потеряно, повтор через 5 секунд.", flush=True)
                     self.shutdown.wait(5)
         finally:
             self.shutdown.set()
             self.app.stop()
             thread.join(timeout=self.app.settings.timeout + 2)
+            if self.app.telegram_status["state"] != "failed":
+                self.state("stopped", "Telegram остановлен")
 
 
 def pair(settings):

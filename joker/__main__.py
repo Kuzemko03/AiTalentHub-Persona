@@ -57,7 +57,13 @@ def main():
             if not settings.owner_id:
                 raise TelegramError("Перед запуском с Telegram задайте TELEGRAM_OWNER_ID через pair.")
             runner = TelegramRunner(app)
-            threading.Thread(target=runner.run, daemon=True).start()
+            def run_telegram():
+                try:
+                    runner.run()
+                except Exception as exc:
+                    runner.state("failed", "Telegram остановлен; проверьте настройки и перезапустите")
+                    print(f"Telegram остановлен ({type(exc).__name__}).", flush=True)
+            threading.Thread(target=run_telegram, daemon=True).start()
         print(f"Панель Джокера: http://127.0.0.1:{server.server_port}", flush=True)
         try:
             server.serve_forever()

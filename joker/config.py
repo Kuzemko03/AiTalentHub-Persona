@@ -26,7 +26,7 @@ class Settings:
     root: Path = ROOT
     backend: str = "codex"
     model: str = "gpt-6-luna"
-    reasoning: str = "low"
+    reasoning: str = "none"
     codex_bin: str = ""
     timeout: int = 90
     telegram_token: str = ""
@@ -42,7 +42,7 @@ class Settings:
         values = {**read_env(root / ".env"), **os.environ}
         return cls(root=root, backend=values.get("MODEL_BACKEND", "codex"),
                    model=values.get("CODEX_MODEL", "gpt-6-luna"),
-                   reasoning=values.get("CODEX_REASONING_EFFORT", "low"),
+                   reasoning=values.get("CODEX_REASONING_EFFORT", "none"),
                    codex_bin=values.get("CODEX_BIN", ""),
                    timeout=int(values.get("CODEX_TIMEOUT", "90")),
                    telegram_token=values.get("TELEGRAM_BOT_TOKEN", ""),

@@ -29,6 +29,7 @@ class App:
         self.guard = threading.RLock()
         self.generation = threading.Lock()
         self.active_cancel = None
+        self.telegram_status = {"state": "disabled", "detail": "Telegram не запущен"}
 
     @property
     def active(self):
@@ -44,27 +45,36 @@ class App:
 
     def switch(self, mask_id):
         with self.guard:
-            if mask_id not in self.masks:
+            if not isinstance(mask_id, str) or mask_id not in self.masks:
                 return "Такой маски нет. Доступны: " + ", ".join(self.masks)
             if self.active_cancel:
                 self.active_cancel.set()
             self.store.set("active_mask", mask_id)
             self.store.set("mask_revision", self.store.get("mask_revision", 0) + 1)
             self.store.set("response_revision", self.store.get("response_revision", 0) + 1)
+            self.store.cancel_pending()
             return self.masks[mask_id]["confirmation"]
 
     def status(self, actor="owner"):
+        with self.guard:
+            return self._status(actor)
+
+    def _status(self, actor):
         mask = self.masks[self.active]
         return {"name": mask["display_name"], "mask": mask["id"],
                 "backend": self.settings.backend,
                 "model": self.settings.model if self.settings.backend == "codex" else self.settings.api_model,
                 "memory": self.store.facts(actor), "minecraft": "не подключён",
                 "generating": bool(self.active_cancel and not self.active_cancel.is_set()),
+                "reasoning": self.settings.reasoning if self.settings.backend == "codex" else None,
+                "telegram": dict(self.telegram_status),
                 "last_call": self.store.get("last_call", {}),
                 "masks": [{"id": m["id"], "name": m["display_name"], "role": m["role"]}
                           for m in self.masks.values()]}
 
     def command(self, text, actor="owner", owner=True):
+        if not isinstance(text, str) or not text.strip() or len(text) > 4000:
+            raise ValueError("Сообщение должно содержать от 1 до 4000 символов.")
         text = text.strip()
         lower = text.casefold()
         token, _, argument = text.partition(" ")
@@ -112,7 +122,9 @@ class App:
             if match:
                 requested = match.group(1)
         if requested:
-            for mask in self.masks.values():
+            with self.guard:
+                masks = list(self.masks.values())
+            for mask in masks:
                 if requested in [mask["id"], mask["display_name"].casefold(), *mask.get("aliases", [])]:
                     return self.switch(mask["id"])
             return "Не нашёл такую маску. Выбери готовую или используй /newmask."
@@ -137,6 +149,10 @@ class App:
     def reply(self, text, actor="owner", expected_revision=None):
         if not isinstance(text, str) or not text.strip() or len(text) > 4000:
             raise ValueError("Сообщение должно содержать от 1 до 4000 символов.")
+        # Capture before waiting: stop/switch also cancels waiting HTTP requests.
+        with self.guard:
+            if expected_revision is None:
+                expected_revision = self.store.get("response_revision", 0)
         with self.generation:
             with self.guard:
                 revision = self.store.get("response_revision", 0)

@@ -91,11 +91,15 @@ class Store:
 
     def accept_update(self, update_id, chat_id, text, status="pending"):
         with self.lock, self.db:
-            cursor = self.db.execute("INSERT OR IGNORE INTO telegram_jobs(update_id,chat_id,text,status) "
-                                     "VALUES (?,?,?,?)", (update_id, chat_id, text, status))
+            inserted = False
+            # Outsiders must not be able to grow the private conversation database.
+            if status != "ignored":
+                cursor = self.db.execute("INSERT OR IGNORE INTO telegram_jobs(update_id,chat_id,text,status) "
+                                         "VALUES (?,?,?,?)", (update_id, chat_id, text, status))
+                inserted = cursor.rowcount == 1
             offset = max(update_id + 1, self.get("telegram_offset", 0))
             self.db.execute("INSERT OR REPLACE INTO settings VALUES ('telegram_offset',?)", (json.dumps(offset),))
-            return cursor.rowcount == 1
+            return inserted
 
     def jobs(self, status):
         with self.lock:

@@ -1,13 +1,39 @@
 """Loopback-only operator panel; no filesystem or shell endpoints."""
 import json
 import secrets
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .backends import Cancelled, ModelError
 
 
+class BoundedServer(ThreadingHTTPServer):
+    """Bound local sockets as well as generation waiters; controls retain capacity."""
+    def __init__(self, *args, **kwargs):
+        self.slots = threading.BoundedSemaphore(16)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        request.settimeout(10)
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+
 def make_server(app, port=None):
     csrf = secrets.token_urlsafe(32)
+    chat_slots = threading.BoundedSemaphore(4)
     html_path = app.settings.root / "joker" / "panel.html"
 
     class Handler(BaseHTTPRequestHandler):
@@ -18,41 +44,68 @@ def make_server(app, port=None):
             return self.headers.get("Host") in (f"127.0.0.1:{self.server.server_port}",
                                                 f"localhost:{self.server.server_port}")
 
+        def end_headers(self):
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'nonce-" + csrf
+                             + "'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+            super().end_headers()
+
+        def write_body(self, raw):
+            try:
+                self.wfile.write(raw)
+            except OSError:
+                pass  # Closing a browser tab must not produce an uncaught server error.
+
         def respond(self, value, status=200):
             raw = json.dumps(value, ensure_ascii=False).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
-            self.wfile.write(raw)
+            self.write_body(raw)
 
         def do_GET(self):
             if not self.allowed_host():
                 return self.respond({"error": "Host запрещён"}, 403)
             if self.path == "/":
-                raw = html_path.read_text(encoding="utf-8").replace("__CSRF__", json.dumps(csrf)).encode()
+                raw = (html_path.read_text(encoding="utf-8")
+                       .replace("__CSRF__", json.dumps(csrf))
+                       .replace("<script>", '<script nonce="' + csrf + '">').encode())
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
-                self.send_header("X-Frame-Options", "DENY")
                 self.end_headers()
-                self.wfile.write(raw)
+                self.write_body(raw)
             elif self.path == "/api/status":
                 self.respond(app.status())
             else:
                 self.respond({"error": "Не найдено"}, 404)
 
         def do_POST(self):
-            if not self.allowed_host() or not secrets.compare_digest(self.headers.get("X-Joker-Key", ""), csrf):
+            key = self.headers.get("X-Joker-Key", "")
+            origin = self.headers.get("Origin")
+            if (not self.allowed_host() or not key.isascii() or not secrets.compare_digest(key, csrf)
+                    or origin is not None and origin not in (f"http://127.0.0.1:{self.server.server_port}",
+                                                            f"http://localhost:{self.server.server_port}")):
                 return self.respond({"error": "Запрос запрещён"}, 403)
             try:
+                if self.headers.get("Transfer-Encoding"):
+                    raise ValueError("Неподдерживаемый формат передачи.")
                 length = int(self.headers.get("Content-Length", "0"))
                 if length < 1 or length > 16000:
                     raise ValueError("Неверный размер запроса.")
                 value = json.loads(self.rfile.read(length))
+                if not isinstance(value, dict):
+                    raise ValueError("Ожидается JSON-объект.")
                 if self.path == "/api/chat":
-                    self.respond(app.handle(value["text"]))
+                    # Leave sockets available for stop, switching and status requests.
+                    if not chat_slots.acquire(blocking=False):
+                        return self.respond({"error": "Очередь заполнена. Подождите ответ или нажмите Стоп."}, 429)
+                    try:
+                        self.respond(app.handle(value["text"]))
+                    finally:
+                        chat_slots.release()
                 elif self.path == "/api/mask":
                     self.respond({"reply": app.switch(value["id"])})
                 elif self.path == "/api/stop":
@@ -63,7 +116,7 @@ def make_server(app, port=None):
                 self.respond({"cancelled": True, "reply": "Предыдущий ответ отменён."})
             except ModelError as exc:
                 self.respond({"error": str(exc)}, 503)
-            except (ValueError, KeyError, TypeError):
+            except (ValueError, KeyError, TypeError, OSError, RecursionError):
                 self.respond({"error": "Проверьте поля запроса."}, 400)
 
-    return ThreadingHTTPServer(("127.0.0.1", app.settings.panel_port if port is None else port), Handler)
+    return BoundedServer(("127.0.0.1", app.settings.panel_port if port is None else port), Handler)
