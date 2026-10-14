@@ -1,0 +1,169 @@
+"""Telegram long polling. One private owner, durable inbox and outbox."""
+import json
+import threading
+import time
+import urllib.error
+import urllib.request
+
+from .backends import Cancelled, ModelError
+
+
+class TelegramError(Exception):
+    pass
+
+
+class TelegramAPI:
+    def __init__(self, token):
+        if not token:
+            raise TelegramError("Заполните TELEGRAM_BOT_TOKEN в .env.")
+        self._base = "https://api.telegram.org/bot" + token + "/"
+
+    def call(self, method, **payload):
+        request = urllib.request.Request(self._base + method,
+                                         data=json.dumps(payload).encode(),
+                                         headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=35) as response:
+                data = json.load(response)
+        except (urllib.error.URLError, ValueError, TimeoutError):
+            # urllib exceptions contain the token-bearing URL; never log their repr.
+            raise TelegramError("Telegram недоступен или отклонил запрос. Проверьте токен и соединение.") from None
+        if not data.get("ok"):
+            raise TelegramError("Telegram не подтвердил выполнение запроса.")
+        return data["result"]
+
+    def send(self, chat_id, text, keyboard=None):
+        chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)] or ["…"]
+        for i, chunk in enumerate(chunks):
+            payload = {"chat_id": chat_id, "text": chunk}
+            if keyboard and i == len(chunks) - 1:
+                payload["reply_markup"] = keyboard
+            self.call("sendMessage", **payload)
+
+
+def keyboard(app):
+    masks = app.status()["masks"]
+    rows = [[{"text": m["name"], "callback_data": "mask:" + m["id"]}]
+            for m in masks if m["id"] != "joker"]
+    rows.append([{"text": "Джокер", "callback_data": "mask:joker"},
+                 {"text": "Стоп", "callback_data": "stop"},
+                 {"text": "Статус", "callback_data": "status"}])
+    return {"inline_keyboard": rows}
+
+
+def message_from_update(update):
+    callback = update.get("callback_query")
+    if callback:
+        message = callback.get("message", {})
+        data = callback.get("data", "")
+        text = "/mask " + data[5:] if data.startswith("mask:") else {"stop": "/stop", "status": "/status"}.get(data, "/help")
+        return message.get("chat", {}), callback.get("from", {}), text, callback.get("id")
+    message = update.get("message", {})
+    return message.get("chat", {}), message.get("from", {}), message.get("text", ""), None
+
+
+class TelegramRunner:
+    def __init__(self, app, api=None):
+        self.app = app
+        self.api = api or TelegramAPI(app.settings.telegram_token)
+        self.shutdown = threading.Event()
+        self.delivery_lock = threading.RLock()
+
+    def accept(self, update):
+        chat, sender, text, callback_id = message_from_update(update)
+        update_id = update["update_id"]
+        if callback_id:
+            self.api.call("answerCallbackQuery", callback_query_id=callback_id)
+        if (chat.get("type") != "private" or sender.get("is_bot")
+                or sender.get("id") != self.app.settings.owner_id or not text):
+            self.app.store.accept_update(update_id, chat.get("id", 0), "", "ignored")
+            return
+        with self.delivery_lock:
+            if not self.app.store.accept_update(update_id, chat["id"], text):
+                return
+            if len(text) > 4000:
+                result = "Сообщение слишком длинное: до 4000 символов."
+            else:
+                result = self.app.command(text)
+            if result is not None:
+                self.app.store.job_status(update_id, "ready", result)
+
+    def work_once(self):
+        with self.app.guard:
+            jobs = self.app.store.jobs("pending")
+            revision = self.app.store.get("response_revision", 0)
+            if jobs:
+                self.app.store.job_status(jobs[0]["update_id"], "running")
+        if jobs:
+            job = jobs[0]
+            try:
+                result = self.app.reply(job["text"], expected_revision=revision)
+                with self.delivery_lock:
+                    self.app.store.job_status(job["update_id"], "ready", result["reply"], revision=result["_revision"])
+            except Cancelled:
+                self.app.store.job_status(job["update_id"], "cancelled")
+            except (ModelError, ValueError) as exc:
+                self.app.store.job_status(job["update_id"], "ready", str(exc), type(exc).__name__)
+        self.deliver()
+
+    def deliver(self):
+        with self.delivery_lock:
+            for job in self.app.store.jobs("ready"):
+                if job["revision"] is not None and job["revision"] != self.app.store.get("response_revision", 0):
+                    self.app.store.job_status(job["update_id"], "cancelled")
+                    continue
+                self.api.send(job["chat_id"], job["reply"], keyboard(self.app))
+                self.app.store.job_status(job["update_id"], "sent", job["reply"], job["error"])
+
+    def worker(self):
+        while not self.shutdown.is_set():
+            try:
+                self.work_once()
+            except TelegramError:
+                print("Telegram: доставка отложена, повтор через 5 секунд.", flush=True)
+                self.shutdown.wait(5)
+            self.shutdown.wait(0.2)
+
+    def run(self):
+        if not self.app.settings.owner_id:
+            raise TelegramError("Сначала выполните python -m joker pair и задайте TELEGRAM_OWNER_ID.")
+        info = self.api.call("getMe")
+        if self.api.call("getWebhookInfo").get("url"):
+            raise TelegramError("У бота настроен webhook. Выберите отдельного бота или отключите его самостоятельно.")
+        print(f"Telegram подключён: @{info['username']}; доступ только владельцу.", flush=True)
+        self.app.store.recover_jobs()
+        thread = threading.Thread(target=self.worker, daemon=True)
+        thread.start()
+        try:
+            while not self.shutdown.is_set():
+                try:
+                    updates = self.api.call("getUpdates", offset=self.app.store.get("telegram_offset", 0),
+                                            timeout=20, allowed_updates=["message", "callback_query"])
+                    for update in updates:
+                        self.accept(update)
+                    self.deliver()
+                except TelegramError:
+                    print("Telegram: соединение потеряно, повтор через 5 секунд.", flush=True)
+                    self.shutdown.wait(5)
+        finally:
+            self.shutdown.set()
+            self.app.stop()
+            thread.join(timeout=self.app.settings.timeout + 2)
+
+
+def pair(settings):
+    """Show candidate IDs without claiming the first person who contacts the bot."""
+    api = TelegramAPI(settings.telegram_token)
+    info = api.call("getMe")
+    print(f"Бот: @{info['username']}. Напишите ему /start, затем повторите эту команду.")
+    if api.call("getWebhookInfo").get("url"):
+        raise TelegramError("У бота настроен webhook; привязка через polling недоступна.")
+    users = {}
+    for update in api.call("getUpdates", timeout=0, allowed_updates=["message", "callback_query"]):
+        chat, sender, text, _ = message_from_update(update)
+        if chat.get("type") == "private" and sender.get("id") and not sender.get("is_bot"):
+            users[sender["id"]] = sender.get("username", "без username")
+    for user_id, username in users.items():
+        print(f"Кандидат: @{username}; TELEGRAM_OWNER_ID={user_id}")
+    if not users:
+        print("Входящих сообщений пока нет. Автоматическая привязка первого пользователя отключена.")
