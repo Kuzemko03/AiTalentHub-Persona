@@ -126,6 +126,18 @@ class ChannelTests(unittest.TestCase):
             self.draft(str(number))
         self.assertEqual(self.service.next_draft()["action"], "needs_review")
 
+    def test_requested_topic_creates_only_a_draft_while_automation_is_off(self):
+        self.service.enable(False)
+        result = self.service.command("/пост новый Одна кнопка с четырьмя названиями")
+        self.assertIn("не опубликован", result)
+        context = json.loads(self.backend.messages[0]["content"])
+        self.assertEqual(context["requested_topic"], "Одна кнопка с четырьмя названиями")
+        self.assertIsNone(context["seed_for_inspiration"])
+        self.assertEqual(self.service.status()["posts"][0]["status"], "draft")
+        self.assertFalse(self.api.sent)
+        self.assertFalse(self.service.status()["enabled"])
+        self.assertEqual(self.service.next_draft()["action"], "idle")
+
     def test_bind_requires_channel_owner_and_posting_rights(self):
         for attribute, value in (("type", "supergroup"), ("owner", "member"), ("can_post", False)):
             with self.subTest(attribute=attribute):
@@ -172,7 +184,7 @@ class ChannelTests(unittest.TestCase):
             with self.subTest(file=file), self.assertRaises(ChannelError):
                 self.service.attach(post["id"], file)
         self.service.attach(post["id"], self.photo)
-        self.assertEqual(self.service.photo_path(self.app.store.channel_post(post["id"])), self.photo)
+        self.assertEqual(self.service.photo_path(self.app.store.channel_post(post["id"])), self.photo.resolve())
 
     def test_send_once_and_store_both_telegram_message_ids(self):
         post = self.draft(photo=True)

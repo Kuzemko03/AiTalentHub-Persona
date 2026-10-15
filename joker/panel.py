@@ -133,7 +133,7 @@ def make_server(app, port=None):
                     app.channel.enable(False)
                     self.respond({"reply": "Автопостинг на паузе."})
                 elif self.path == "/api/channel/draft":
-                    draft = app.channel.generate()
+                    draft = app.channel.generate(topic=value.get("topic", ""))
                     self.respond({"reply": "Черновик готов: " + draft["title"]})
                 elif self.path == "/api/channel/publish":
                     published = app.channel.publish(value["id"], automatic=False)

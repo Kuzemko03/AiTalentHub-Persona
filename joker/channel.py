@@ -118,7 +118,7 @@ class ChannelService:
         rows = self.store.channel_posts(30)
         attention = self.store.channel_attention()
         return {"target": self.store.get("channel_target", {}), "enabled": self.store.get("channel_enabled", False),
-                "schedule": "12:00 и 20:00 · Europe/Volgograd", "attention": attention,
+                "schedule": "12:00 и 20:00 · Europe/Volgograd" if self.store.get("channel_enabled", False) else "Только ручная публикация", "attention": attention,
                 "events_waiting": len(self.store.channel_events()), "posts": [self.view(p) for p in rows[:8]]}
 
     def add_event(self, text):
@@ -145,7 +145,10 @@ class ChannelService:
         self.store.add_channel_post(post_id, payload, self.store.get("channel_target", {}).get("id", 0))
         return self.view(self.store.channel_post(post_id))
 
-    def generate(self, expected_revision=None):
+    def generate(self, expected_revision=None, *, topic=""):
+        topic = public_text(topic)
+        if len(topic) > 1000:
+            raise ChannelError("Тема черновика должна быть короче 1000 символов.")
         if not self.app.generation.acquire(blocking=False):
             raise ChannelError("Сейчас идёт разговор. Подготовку поста можно повторить позже.")
         cancel = threading.Event()
@@ -174,7 +177,7 @@ class ChannelService:
                       'При отсутствии публичного события создай явно вымышленную сцену. '
                       'Внешние ссылки, чужие люди и новые технические факты не нужны. '
                       'Пост должен развиваться, а не повторять одну шутку пятью абзацами.')
-            context = {"public_event": event, "seed_for_inspiration": seed,
+            context = {"requested_topic": topic, "public_event": event, "seed_for_inspiration": seed if not topic else None,
                        "recent_public_editorial_material": recent}
             result = self.app.backend.generate(system, [{"role": "user", "content": json.dumps(context, ensure_ascii=False)}], cancel,
                                                schema=POST_SCHEMA)
@@ -338,6 +341,9 @@ class ChannelService:
             return "Событие разрешено для публичного дневника: " + event_id + ". Личные чаты туда автоматически не попадают."
         if token in ("/пост", "/post"):
             action, _, post_id = argument.partition(" ")
+            if action.casefold() in ("новый", "new", "черновик", "draft"):
+                view = self.generate(topic=post_id.strip())
+                return f"Черновик {view['id']} · не опубликован\n\n" + self.formatted(view)
             if action.casefold() in ("опубликовать", "publish"):
                 p = self.publish(post_id.strip(), automatic=False)
                 return "Пост опубликован: " + p["title"]
@@ -377,7 +383,7 @@ def cli(arguments):
             service.enable(action == "on")
             result = {"enabled": action == "on"}
         elif action == "draft":
-            result = service.generate()
+            result = service.generate(topic=args.value or "")
         elif action == "next":
             result = service.next_draft()
         elif action in ("show", "attach", "publish", "discard"):
