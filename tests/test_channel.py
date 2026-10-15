@@ -12,7 +12,7 @@ from joker.backends import Cancelled, CodexBackend
 from joker.channel import ChannelError, LOCAL_TZ, POST_SCHEMA
 from joker.config import ROOT, Settings
 from joker.core import App
-from joker.telegram_bot import TelegramAPI, TelegramError
+from joker.telegram_bot import TelegramAPI, TelegramError, TelegramRunner
 
 
 def payload(key="one"):
@@ -137,6 +137,32 @@ class ChannelTests(unittest.TestCase):
         self.assertFalse(self.api.sent)
         self.assertFalse(self.service.status()["enabled"])
         self.assertEqual(self.service.next_draft()["action"], "idle")
+
+    def test_telegram_editorial_is_deferred_and_can_be_stopped(self):
+        api = Mock()
+        runner = TelegramRunner(self.app, api)
+        update = {"update_id": 1, "message": {"chat": {"id": 123, "type": "private"},
+                  "from": {"id": 123}, "text": "/пост новый тема"}}
+        with patch.object(self.service, "generate", wraps=self.service.generate) as generate:
+            runner.accept(update)
+            generate.assert_not_called()
+            self.assertEqual(len(self.app.store.jobs("pending")), 1)
+            self.app.stop()
+            runner.work_once()
+            generate.assert_not_called()
+        self.assertFalse(self.service.status()["posts"])
+
+    def test_telegram_editorial_worker_delivers_draft_only_to_owner(self):
+        api = Mock()
+        runner = TelegramRunner(self.app, api)
+        runner.accept({"update_id": 1, "message": {"chat": {"id": 123, "type": "private"},
+                       "from": {"id": 123}, "text": "/пост новый тема"}})
+        runner.work_once()
+        api.send.assert_called_once()
+        self.assertEqual(api.send.call_args.args[0], 123)
+        self.assertIn("не опубликован", api.send.call_args.args[1])
+        self.assertFalse(self.api.sent)
+        self.assertEqual(self.service.status()["posts"][0]["status"], "draft")
 
     def test_bind_requires_channel_owner_and_posting_rights(self):
         for attribute, value in (("type", "supergroup"), ("owner", "member"), ("can_post", False)):

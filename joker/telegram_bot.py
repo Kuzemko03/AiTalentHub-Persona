@@ -81,6 +81,14 @@ def message_from_update(update):
     return message.get("chat", {}), message.get("from", {}), message.get("text", ""), None
 
 
+def editorial_topic(text):
+    token, _, argument = text.strip().partition(" ")
+    if token.split("@", 1)[0].casefold() not in ("/пост", "/post"):
+        return None
+    action, _, topic = argument.partition(" ")
+    return topic.strip() if action.casefold() in ("новый", "new", "черновик", "draft") else None
+
+
 class TelegramRunner:
     def __init__(self, app, api=None):
         self.app = app
@@ -120,7 +128,8 @@ class TelegramRunner:
                 result = "Сообщение слишком длинное: до 4000 символов."
             else:
                 try:
-                    result = self.app.command(text)
+                    # Model work belongs in the worker; polling must remain available for Stop.
+                    result = None if editorial_topic(text) is not None else self.app.command(text)
                 except ValueError as exc:
                     result = str(exc)
             if result is not None:
@@ -139,7 +148,13 @@ class TelegramRunner:
             except TelegramError:
                 pass  # This hint is optional; it must never strand a running job.
             try:
-                result = self.app.reply(job["text"], expected_revision=revision)
+                topic = editorial_topic(job["text"])
+                if topic is None:
+                    result = self.app.reply(job["text"], expected_revision=revision)
+                else:
+                    draft = self.app.channel.generate(expected_revision=revision, topic=topic)
+                    result = {"reply": f"Черновик {draft['id']} · не опубликован\n\n" + self.app.channel.formatted(draft),
+                              "_revision": revision}
                 with self.delivery_lock:
                     self.app.store.job_status(job["update_id"], "ready", result["reply"], revision=result["_revision"])
             except Cancelled:
