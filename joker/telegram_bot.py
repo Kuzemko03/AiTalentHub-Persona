@@ -4,6 +4,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 from .backends import Cancelled, ModelError
 
@@ -19,9 +20,11 @@ class TelegramAPI:
         self._base = "https://api.telegram.org/bot" + token + "/"
 
     def call(self, method, **payload):
+        return self._request(method, json.dumps(payload).encode(), "application/json")
+
+    def _request(self, method, body, content_type):
         request = urllib.request.Request(self._base + method,
-                                         data=json.dumps(payload).encode(),
-                                         headers={"Content-Type": "application/json"})
+                                         data=body, headers={"Content-Type": content_type})
         try:
             with urllib.request.urlopen(request, timeout=35) as response:
                 data = json.load(response)
@@ -31,6 +34,22 @@ class TelegramAPI:
         if not isinstance(data, dict) or not data.get("ok") or "result" not in data:
             raise TelegramError("Telegram не подтвердил выполнение запроса.")
         return data["result"]
+
+    def upload_photo(self, chat_id, path, caption):
+        if not 0 < path.stat().st_size <= 10_000_000:
+            raise TelegramError("Иллюстрация должна быть не больше 10 МБ.")
+        boundary = "joker" + uuid.uuid4().hex
+        parts = []
+        for key, value in (("chat_id", str(chat_id)), ("caption", caption)):
+            parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n').encode())
+        kind = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+        parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="illustration{path.suffix.lower()}"\r\n'
+                      f'Content-Type: {kind}\r\n\r\n').encode())
+        parts.extend((path.read_bytes(), f"\r\n--{boundary}--\r\n".encode()))
+        result = self._request("sendPhoto", b"".join(parts), "multipart/form-data; boundary=" + boundary)
+        if not isinstance(result, dict) or not isinstance(result.get("message_id"), int):
+            raise TelegramError("Telegram не подтвердил отправку иллюстрации.")
+        return result
 
     def send(self, chat_id, text, keyboard=None):
         chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)] or ["…"]
@@ -74,6 +93,18 @@ class TelegramRunner:
         self.app.telegram_status = {"state": state, "detail": detail}
 
     def accept(self, update):
+        membership = update.get("my_chat_member")
+        channel_post = update.get("channel_post")
+        if membership or channel_post:
+            chat = (membership or channel_post).get("chat", {})
+            if chat.get("type") == "channel":
+                known = self.app.store.get("channel_candidates", {})
+                known[str(chat["id"])] = {"id": chat["id"], "title": chat.get("title", ""),
+                    "username": chat.get("username", ""),
+                    "added_by_owner": bool(membership and membership.get("from", {}).get("id") == self.app.settings.owner_id)}
+                self.app.store.set("channel_candidates", dict(list(known.items())[-10:]))
+            self.app.store.accept_update(update["update_id"], 0, "", "ignored")
+            return
         chat, sender, text, callback_id = message_from_update(update)
         update_id = update["update_id"]
         if (chat.get("type") != "private" or sender.get("is_bot")
@@ -165,7 +196,7 @@ class TelegramRunner:
             while not self.shutdown.is_set():
                 try:
                     updates = self.api.call("getUpdates", offset=self.app.store.get("telegram_offset", 0),
-                                            timeout=20, allowed_updates=["message", "callback_query"])
+                                            timeout=20, allowed_updates=["message", "callback_query", "my_chat_member", "channel_post"])
                     if self.shutdown.is_set():
                         break
                     for update in updates:

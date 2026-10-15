@@ -2,6 +2,7 @@ import argparse
 import json
 import shutil
 import threading
+import sys
 
 from .backends import Cancelled, ModelError
 from .config import Settings
@@ -11,6 +12,10 @@ from .telegram_bot import TelegramError, TelegramRunner, pair
 
 
 def main():
+    if sys.argv[1:2] == ["channel"]:
+        from .channel import cli
+        cli(sys.argv[2:])
+        return
     parser = argparse.ArgumentParser(description="Джокер — персонаж со сменяемыми масками")
     parser.add_argument("mode", choices=["chat", "serve", "telegram", "pair", "doctor", "ask"], nargs="?", default="chat")
     parser.add_argument("text", nargs="?")

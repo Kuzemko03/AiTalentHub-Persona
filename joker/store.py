@@ -25,6 +25,14 @@ class Store:
                 CREATE TABLE IF NOT EXISTS telegram_jobs (
                   update_id INTEGER PRIMARY KEY, chat_id INTEGER, text TEXT, status TEXT,
                   reply TEXT DEFAULT '', error TEXT DEFAULT '', revision INTEGER);
+                CREATE TABLE IF NOT EXISTS channel_posts (
+                  id TEXT PRIMARY KEY, created_at TEXT, published_at TEXT DEFAULT '',
+                  status TEXT, payload TEXT, photo TEXT DEFAULT '', target INTEGER DEFAULT 0,
+                  photo_message_id INTEGER, text_message_id INTEGER, error TEXT DEFAULT '');
+                CREATE TABLE IF NOT EXISTS channel_events (
+                  id TEXT PRIMARY KEY, text TEXT, created_at TEXT, used_by TEXT DEFAULT '');
+                CREATE TABLE IF NOT EXISTS channel_slots (
+                  slot TEXT PRIMARY KEY, post_id TEXT DEFAULT '', state TEXT, created_at TEXT);
             """)
 
     def recover_jobs(self):
@@ -114,3 +122,62 @@ class Store:
     def cancel_pending(self):
         with self.lock, self.db:
             self.db.execute("UPDATE telegram_jobs SET status='cancelled' WHERE status='pending'")
+
+    def channel_posts(self, limit=20):
+        with self.lock:
+            return [dict(r) for r in self.db.execute(
+                "SELECT * FROM channel_posts ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,))]
+
+    def channel_post(self, post_id):
+        with self.lock:
+            row = self.db.execute("SELECT * FROM channel_posts WHERE id=?", (post_id,)).fetchone()
+            return dict(row) if row else None
+
+    def channel_attention(self):
+        with self.lock:
+            return [row[0] for row in self.db.execute(
+                "SELECT id FROM channel_posts WHERE status IN ('publishing','uncertain') ORDER BY created_at")]
+
+    def add_channel_post(self, post_id, payload, target=0):
+        with self.lock, self.db:
+            self.db.execute("INSERT INTO channel_posts(id,created_at,status,payload,target) VALUES (?,?,?,?,?)",
+                            (post_id, self.now(), "draft", json.dumps(payload, ensure_ascii=False), target))
+
+    def update_channel_post(self, post_id, **values):
+        allowed = {"status", "photo", "photo_message_id", "text_message_id", "error", "published_at", "target"}
+        if not values or not set(values) <= allowed:
+            raise ValueError("Неверные поля публикации.")
+        with self.lock, self.db:
+            fields = ",".join(key + "=?" for key in values)
+            self.db.execute("UPDATE channel_posts SET " + fields + " WHERE id=?", (*values.values(), post_id))
+
+    def claim_channel_post(self, post_id, target):
+        with self.lock, self.db:
+            changed = self.db.execute("UPDATE channel_posts SET status='publishing',target=? "
+                                      "WHERE id=? AND status='draft' AND target IN (0,?)",
+                                      (target, post_id, target)).rowcount
+            return bool(changed)
+
+    def add_channel_event(self, event_id, text):
+        with self.lock, self.db:
+            self.db.execute("INSERT INTO channel_events(id,text,created_at) VALUES (?,?,?)",
+                            (event_id, text, self.now()))
+
+    def channel_events(self):
+        with self.lock:
+            return [dict(r) for r in self.db.execute(
+                "SELECT * FROM channel_events WHERE used_by='' ORDER BY created_at LIMIT 10")]
+
+    def claim_channel_slot(self, slot):
+        with self.lock, self.db:
+            return bool(self.db.execute("INSERT OR IGNORE INTO channel_slots(slot,state,created_at) "
+                                        "VALUES (?,'drafting',?)", (slot, self.now())).rowcount)
+
+    def channel_slot(self, slot):
+        with self.lock:
+            row = self.db.execute("SELECT * FROM channel_slots WHERE slot=?", (slot,)).fetchone()
+            return dict(row) if row else None
+
+    def set_channel_slot(self, slot, post_id, state):
+        with self.lock, self.db:
+            self.db.execute("UPDATE channel_slots SET post_id=?,state=? WHERE slot=?", (post_id, state, slot))

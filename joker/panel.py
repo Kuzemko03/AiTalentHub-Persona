@@ -5,6 +5,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .backends import Cancelled, ModelError
+from .telegram_bot import TelegramError
 
 
 class BoundedServer(ThreadingHTTPServer):
@@ -48,7 +49,7 @@ def make_server(app, port=None):
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'nonce-" + csrf
-                             + "'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+                             + "'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
             super().end_headers()
 
         def write_body(self, raw):
@@ -79,6 +80,18 @@ def make_server(app, port=None):
                 self.write_body(raw)
             elif self.path == "/api/status":
                 self.respond(app.status())
+            elif self.path.startswith("/api/channel/photo/"):
+                try:
+                    post_id = self.path.removeprefix("/api/channel/photo/")
+                    path = app.channel.photo_path(app.store.channel_post(post_id))
+                    raw = path.read_bytes()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/png" if path.suffix.lower() == ".png" else "image/jpeg")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.write_body(raw)
+                except (ValueError, OSError):
+                    self.respond({"error": "Изображение не найдено"}, 404)
             else:
                 self.respond({"error": "Не найдено"}, 404)
 
@@ -110,11 +123,31 @@ def make_server(app, port=None):
                     self.respond({"reply": app.switch(value["id"])})
                 elif self.path == "/api/stop":
                     self.respond({"reply": app.stop()})
+                elif self.path == "/api/channel/bind":
+                    info = app.channel.bind(value["target"])
+                    self.respond({"reply": "Канал подключён: " + info["title"]})
+                elif self.path == "/api/channel/on":
+                    app.channel.enable(True)
+                    self.respond({"reply": "Автопостинг включён."})
+                elif self.path == "/api/channel/off":
+                    app.channel.enable(False)
+                    self.respond({"reply": "Автопостинг на паузе."})
+                elif self.path == "/api/channel/draft":
+                    draft = app.channel.generate()
+                    self.respond({"reply": "Черновик готов: " + draft["title"]})
+                elif self.path == "/api/channel/publish":
+                    published = app.channel.publish(value["id"], automatic=False)
+                    self.respond({"reply": "Опубликовано: " + published["title"]})
+                elif self.path == "/api/channel/discard":
+                    app.channel.discard(value["id"])
+                    self.respond({"reply": "Черновик закрыт."})
                 else:
                     self.respond({"error": "Не найдено"}, 404)
             except Cancelled:
                 self.respond({"cancelled": True, "reply": "Предыдущий ответ отменён."})
             except ModelError as exc:
+                self.respond({"error": str(exc)}, 503)
+            except TelegramError as exc:
                 self.respond({"error": str(exc)}, 503)
             except (ValueError, KeyError, TypeError, OSError, RecursionError):
                 self.respond({"error": "Проверьте поля запроса."}, 400)

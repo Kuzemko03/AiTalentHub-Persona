@@ -50,6 +50,16 @@ def parse_answer(text: str) -> dict:
         raise ModelError("Модель вернула ответ без ожидаемой структуры.") from None
 
 
+def parse_object(text):
+    try:
+        value = json.loads(text)
+        if not isinstance(value, dict):
+            raise ValueError()
+        return value
+    except (TypeError, ValueError):
+        raise ModelError("Модель вернула ответ без ожидаемой структуры.") from None
+
+
 class CodexBackend:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -61,12 +71,12 @@ class CodexBackend:
             raise ModelError("Codex CLI не найден. Установите CLI и выполните codex login.")
         return binary
 
-    def generate(self, system: str, messages: list[dict], cancel: threading.Event):
+    def generate(self, system: str, messages: list[dict], cancel: threading.Event, *, schema=None):
         started = time.monotonic()
         with tempfile.TemporaryDirectory(prefix="joker-codex-") as folder:
             run_dir = Path(folder)
             schema_path = run_dir / "answer-schema.json"
-            schema_path.write_text(json.dumps(SCHEMA), encoding="utf-8")
+            schema_path.write_text(json.dumps(SCHEMA if schema is None else schema), encoding="utf-8")
             instructions_path = run_dir / "chat-instructions.txt"
             instructions_path.write_text(CHAT_INSTRUCTIONS + "\n\n" + system, encoding="utf-8")
             command = [self.executable(), "--no-daemon", "exec", "--ignore-user-config",
@@ -148,7 +158,7 @@ class CodexBackend:
                 if "limit" in error.lower() or "quota" in error.lower():
                     reason = " Достигнут лимит Codex; дождитесь его обновления."
                 raise ModelError("Codex CLI не вернул ответ." + reason)
-            result = parse_answer(answer)
+            result = parse_answer(answer) if schema is None else parse_object(answer)
             result.update(usage=usage, model=self.settings.model,
                           latency=round(time.monotonic() - started, 2), backend="codex")
             return result
@@ -158,7 +168,7 @@ class ApiBackend:
     def __init__(self, settings: Settings):
         self.settings = settings
 
-    def generate(self, system: str, messages: list[dict], cancel: threading.Event):
+    def generate(self, system: str, messages: list[dict], cancel: threading.Event, *, schema=None):
         if not self.settings.api_model or not self.settings.api_key:
             raise ModelError("Заполните LLM_MODEL и LLM_API_KEY либо выберите MODEL_BACKEND=codex.")
         if cancel.is_set():
@@ -166,7 +176,7 @@ class ApiBackend:
         started = time.monotonic()
         body = {"model": self.settings.api_model,
                 "messages": [{"role": "system", "content": system}, *messages],
-                "response_format": {"type": "json_object"}, "max_tokens": 400}
+                "response_format": {"type": "json_object"}, "max_tokens": 2000 if schema is not None else 400}
         request = urllib.request.Request(self.settings.api_url.rstrip("/") + "/chat/completions",
                                          data=json.dumps(body).encode(), headers={
                                              "Content-Type": "application/json",
@@ -181,7 +191,8 @@ class ApiBackend:
         try:
             if not isinstance(data, dict):
                 raise TypeError()
-            result = parse_answer(data["choices"][0]["message"]["content"])
+            content = data["choices"][0]["message"]["content"]
+            result = parse_answer(content) if schema is None else parse_object(content)
         except (KeyError, IndexError, TypeError):
             raise ModelError("Сервис модели вернул неожиданный ответ.") from None
         result.update(usage=data.get("usage", {}), model=self.settings.api_model,

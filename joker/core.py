@@ -7,12 +7,15 @@ import uuid
 from .backends import Cancelled, ModelError, make_backend
 from .config import Settings
 from .store import Store
+from .telegram_bot import TelegramError
 
 HELP = ("Я Джокер. Выбери маску кнопкой или скажи «будь домохозяйкой», «будь ИИ-инженером», "
         "«будь слесарем».\n/статус — состояние\n/сброс — вернуться к Джокеру\n"
         "/стоп — остановить ответ\n/remember факт — сохранить факт\n"
         "/newmask Имя | роль | характер | манера речи — новая маска.\n"
-        "Сейчас работаю в текстовом чате; подключение Minecraft — следующий этап.")
+        "Сейчас работаю в текстовом чате; подключение Minecraft — следующий этап.\n"
+        "/канал — подключение канала\n/пост — черновик\n/автопост вкл или выкл — публикации\n"
+        "/событие текст — материал, который можно опубликовать.")
 
 
 class App:
@@ -30,6 +33,8 @@ class App:
         self.generation = threading.Lock()
         self.active_cancel = None
         self.telegram_status = {"state": "disabled", "detail": "Telegram не запущен"}
+        from .channel import ChannelService
+        self.channel = ChannelService(self)
 
     @property
     def active(self):
@@ -68,6 +73,7 @@ class App:
                 "generating": bool(self.active_cancel and not self.active_cancel.is_set()),
                 "reasoning": self.settings.reasoning if self.settings.backend == "codex" else None,
                 "telegram": dict(self.telegram_status),
+                "channel": self.channel.status(),
                 "last_call": self.store.get("last_call", {}),
                 "masks": [{"id": m["id"], "name": m["display_name"], "role": m["role"]}
                           for m in self.masks.values()]}
@@ -81,6 +87,11 @@ class App:
         token = token.split("@", 1)[0].casefold()
         if not owner:
             return "Управление персонажем доступно владельцу."
+        if token in ("/канал", "/channel", "/автопост", "/autopost", "/событие", "/event", "/пост", "/post"):
+            try:
+                return self.channel.command(text)
+            except (ValueError, ModelError, TelegramError) as exc:
+                return str(exc)
         if token in ("/start", "/help", "/помощь"):
             return HELP
         if token in ("/stop", "/стоп") or lower in ("стоп", "хватит", "отмена", "джокер, стоп"):
