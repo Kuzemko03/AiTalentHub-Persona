@@ -15,7 +15,8 @@ HELP = ("Напиши «Джокер, стань сантехником» или
         "/newmask Имя | роль | характер | манера речи — новая маска.\n"
         "Сейчас работаю в текстовом чате; подключение Minecraft — следующий этап.\n"
         "/канал — подключение канала\n/пост — посмотреть черновик\n/пост новый тема — написать черновик без публикации\n"
-        "/событие текст — материал, который можно опубликовать.")
+        "/событие текст — материал, который можно опубликовать.\n"
+        "/пост авто тема — черновик со сменой автора\n/комменты вкл или выкл — ответы под постами.")
 
 
 class App:
@@ -36,6 +37,8 @@ class App:
         from .channel import ChannelService
         self.channel = ChannelService(self)
         self.roles = RoleService(self)
+        from .comments import CommentService
+        self.comments = CommentService(self)
 
     @property
     def active(self):
@@ -82,6 +85,7 @@ class App:
                 "reasoning": self.settings.reasoning if self.settings.backend == "codex" else None,
                 "telegram": dict(self.telegram_status),
                 "channel": self.channel.status(),
+                "comments": self.comments.status(),
                 "role": mask["role"], "visual_description": visual_description(mask),
                 "portrait_url": "/api/role/photo/" + mask["id"] if portrait_path(self.settings.root, mask["id"]) else "",
                 "last_call": self.store.get("last_call", {}),
@@ -103,6 +107,11 @@ class App:
         token = token.split("@", 1)[0].casefold()
         if not owner:
             return "Управление персонажем доступно владельцу."
+        if token in ("/комменты", "/comments"):
+            value = argument.strip().casefold()
+            if value in ("вкл", "on", "выкл", "off"):
+                self.comments.enable(value in ("вкл", "on"))
+            return self.comments.status()["detail"]
         with self.guard:
             self.masks.update(self.store.get("custom_masks", {}))
         if token in ("/канал", "/channel", "/автопост", "/autopost", "/событие", "/event", "/пост", "/post"):

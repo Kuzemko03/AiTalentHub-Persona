@@ -164,7 +164,15 @@ class ChannelService:
         self.store.add_channel_post(post_id, payload, self.store.get("channel_target", {}).get("id", 0))
         return self.view(self.store.channel_post(post_id))
 
-    def generate(self, expected_revision=None, *, topic=""):
+    def choose_author(self):
+        preferred = ("plumber", "housewife", "driver", "cook", "engineer", "locksmith")
+        pool = [key for key in (*preferred, *self.app.masks) if key in self.app.masks and key != "joker"]
+        pool = list(dict.fromkeys(pool)) or ["joker"]
+        recent = [json.loads(p["payload"])["mask"] for p in self.store.channel_posts(30)
+                  if p["status"] in ("draft", "published", "publishing")]
+        return min(pool, key=lambda key: (recent.count(key), -recent.index(key) if key in recent else -999))
+
+    def generate(self, expected_revision=None, *, topic="", auto_role=False):
         topic = public_text(topic)
         if len(topic) > 1000:
             raise ChannelError("Тема черновика должна быть короче 1000 символов.")
@@ -179,7 +187,8 @@ class ChannelService:
                     raise Cancelled("Подготовка поста отменена.")
                 self.app.active_cancel = cancel
                 call_id = self.store.reserve_call(self.app.settings.daily_requests)
-                author = dict(self.app.masks[self.app.active])
+                role_id = self.choose_author() if auto_role else self.app.active
+                author = dict(self.app.masks[role_id])
             root = self.app.settings.root
             recent = [json.loads(p["payload"]) for p in self.store.channel_posts(20)]
             events = self.store.channel_events()
@@ -300,21 +309,25 @@ class ChannelService:
             raise ChannelError("Пост уже отправляется, закрыт или требует проверки доставки.")
         try:
             api = self.telegram()
+            caption = text + "\nИИ-фото"
+            compact = bool(photo and len(caption.encode("utf-16-le")) // 2 <= 1024)
             if photo:
                 name = payload.get("role_profile", self.app.masks[payload["mask"]])["display_name"]
-                sent = api.upload_photo(target["id"], photo, payload["title"] + "\n\nИИ-фото · вымышленный образ · " + name)
+                sent = api.upload_photo(target["id"], photo, caption if compact else payload["title"] + "\n\nИИ-фото · вымышленный образ · " + name)
                 photo_id = sent["message_id"]
                 self.store.update_channel_post(post_id, photo_message_id=photo_id)
-                time.sleep(1.05)
+                if not compact:
+                    time.sleep(1.05)
             else:
                 photo_id = None
             args = {"chat_id": target["id"], "text": text, "link_preview_options": {"is_disabled": True}}
-            if automatic and (not self.store.get("channel_enabled", False)
+            if not compact and automatic and (not self.store.get("channel_enabled", False)
                               or self.store.get("channel_target", {}).get("id") != target["id"]):
                 raise ChannelError("Публикация остановлена владельцем.")
             if photo_id:
                 args["reply_parameters"] = {"message_id": photo_id, "allow_sending_without_reply": True}
-            sent = api.call("sendMessage", **args)
+            if not compact:
+                sent = api.call("sendMessage", **args)
             self.store.update_channel_post(post_id, text_message_id=sent["message_id"], status="published", published_at=self.store.now())
             if payload.get("event_id"):
                 with self.store.lock, self.store.db:
@@ -383,8 +396,8 @@ class ChannelService:
             return "Событие разрешено для публичного дневника: " + event_id + ". Личные чаты туда автоматически не попадают."
         if token in ("/пост", "/post"):
             action, _, post_id = argument.partition(" ")
-            if action.casefold() in ("новый", "new", "черновик", "draft"):
-                view = self.generate(topic=post_id.strip())
+            if action.casefold() in ("новый", "new", "черновик", "draft", "авто", "auto"):
+                view = self.generate(topic=post_id.strip(), auto_role=action.casefold() in ("авто", "auto"))
                 return f"Черновик {view['id']} · не опубликован\n\n" + self.formatted(view)
             if action.casefold() in ("опубликовать", "publish"):
                 p = self.publish(post_id.strip(), automatic=False)
@@ -395,7 +408,7 @@ class ChannelService:
             posts = self.store.channel_posts(10)
             draft = next((p for p in posts if p["status"] == "draft"), None)
             if not draft:
-                return "Готовых черновиков пока нет. Новый выпуск готовится по расписанию. /событие текст — дать материал."
+                return "Готовых черновиков пока нет. /пост авто тема — подготовить новый; /событие текст — дать материал."
             view = self.view(draft)
             return f"Черновик {view['id']}\n\n" + self.formatted(view) + f"\n\n/пост опубликовать {view['id']}"
         return None
@@ -406,9 +419,10 @@ def cli(arguments):
     from .config import Settings
     from .core import App
     parser = argparse.ArgumentParser(description="Редакция Telegram-канала Джокера")
-    parser.add_argument("action", choices=("status", "bind", "on", "off", "draft", "next", "show", "attach", "publish", "import", "seed", "discard", "event"))
+    parser.add_argument("action", choices=("status", "bind", "on", "off", "draft", "next", "show", "attach", "publish", "import", "seed", "discard", "event", "comments"))
     parser.add_argument("value", nargs="?")
     parser.add_argument("--photo")
+    parser.add_argument("--auto-role", action="store_true", help="выбрать следующего автора самостоятельно")
     parser.add_argument("--manual", action="store_true", help="явная ручная публикация при выключенном расписании")
     args = parser.parse_args(arguments)
     app = App(Settings.load())
@@ -417,6 +431,11 @@ def cli(arguments):
         action = args.action
         if action == "status":
             result = service.status()
+        elif action == "comments":
+            if args.value in ("on", "off"):
+                app.comments.enable(args.value == "on")
+            app.comments.sync(service.telegram(), force=True)
+            result = app.comments.status()
         elif action == "bind":
             if not args.value:
                 parser.error("Укажите @имя канала")
@@ -425,7 +444,7 @@ def cli(arguments):
             service.enable(action == "on")
             result = {"enabled": action == "on"}
         elif action == "draft":
-            result = service.generate(topic=args.value or "")
+            result = service.generate(topic=args.value or "", auto_role=args.auto_role)
         elif action == "next":
             result = service.next_draft()
         elif action in ("show", "attach", "publish", "discard"):

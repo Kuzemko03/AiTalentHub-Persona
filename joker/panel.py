@@ -144,8 +144,11 @@ def make_server(app, port=None):
                     app.channel.enable(False)
                     self.respond({"reply": "Автопостинг на паузе."})
                 elif self.path == "/api/channel/draft":
-                    draft = app.channel.generate(topic=value.get("topic", ""))
+                    draft = app.channel.generate(topic=value.get("topic", ""), auto_role=value.get("auto_role") is True)
                     self.respond({"reply": "Черновик готов: " + draft["title"]})
+                elif self.path in ("/api/comments/on", "/api/comments/off"):
+                    app.comments.enable(self.path.endswith("/on"))
+                    self.respond({"reply": "Ответы в комментариях " + ("включены" if self.path.endswith("/on") else "выключены")})
                 elif self.path == "/api/channel/publish":
                     published = app.channel.publish(value["id"], automatic=False)
                     self.respond({"reply": "Опубликовано: " + published["title"]})

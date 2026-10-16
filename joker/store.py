@@ -33,11 +33,20 @@ class Store:
                   id TEXT PRIMARY KEY, text TEXT, created_at TEXT, used_by TEXT DEFAULT '');
                 CREATE TABLE IF NOT EXISTS channel_slots (
                   slot TEXT PRIMARY KEY, post_id TEXT DEFAULT '', state TEXT, created_at TEXT);
+                CREATE TABLE IF NOT EXISTS discussion_messages (
+                  chat_id INTEGER, message_id INTEGER, post_id TEXT, at TEXT,
+                  PRIMARY KEY(chat_id,message_id));
+                CREATE TABLE IF NOT EXISTS comment_jobs (
+                  update_id INTEGER PRIMARY KEY, chat_id INTEGER, message_id INTEGER,
+                  post_id TEXT, user_id INTEGER, text TEXT, status TEXT, at TEXT,
+                  reply TEXT DEFAULT '', reply_message_id INTEGER, error TEXT DEFAULT '', revision INTEGER);
             """)
 
     def recover_jobs(self):
         with self.lock, self.db:
             self.db.execute("UPDATE telegram_jobs SET status='pending' WHERE status='running'")
+            self.db.execute("UPDATE comment_jobs SET status='pending' WHERE status='running'")
+            self.db.execute("UPDATE comment_jobs SET status='uncertain',error='Проверьте доставку в Telegram' WHERE status='publishing'")
 
     def close(self):
         with self.lock:

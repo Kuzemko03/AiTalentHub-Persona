@@ -16,7 +16,7 @@ from joker.telegram_bot import TelegramAPI, TelegramError, TelegramRunner
 
 
 def payload(key="one"):
-    return {"title": "Один автор и три карандаша", "text": "Я попытался написать заметку о мастерской. " * 8,
+    return {"title": "Один автор и три карандаша", "text": "Я попытался написать заметку о мастерской. " * 32,
             "image_scene": "One masked character at a workshop desk with three different pencils.",
             "novelty_key": "Конфликт карандашей " + key, "mask": "joker", "kind": "fictional_scene", "event_id": ""}
 
@@ -161,6 +161,23 @@ class ChannelTests(unittest.TestCase):
         row = self.app.store.db.execute("SELECT result FROM calls").fetchone()
         self.assertEqual(json.loads(row[0])["purpose"], "channel_draft")
         self.assertEqual(json.loads(row[0])["status"], "done")
+
+    def test_auto_role_rotates_authors_without_switching_private_chat(self):
+        self.app.switch("housewife")
+        first = self.service.generate(topic="Первый сюжет", auto_role=True)
+        self.assertEqual(first["mask"], "plumber")
+        self.assertEqual(self.app.active, "housewife")
+        self.assertEqual(self.service.choose_author(), "housewife")
+
+    def test_short_photo_post_is_sent_as_one_captioned_message(self):
+        value = payload("short")
+        value["text"] = "Короткая история с понятным началом и финалом. " * 5
+        post = self.service.save(value)
+        self.service.attach(post["id"], self.photo)
+        sent = self.service.publish(post["id"])
+        self.assertEqual([p[0] for p in self.api.sent], ["photo"])
+        self.assertEqual(sent["photo_message_id"], sent["text_message_id"])
+        self.assertIn(value["text"].strip(), self.api.sent[0][1]["caption"])
 
     def test_telegram_editorial_is_deferred_and_can_be_stopped(self):
         api = Mock()

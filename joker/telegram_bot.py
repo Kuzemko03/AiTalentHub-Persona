@@ -86,7 +86,7 @@ def editorial_topic(text):
     if token.split("@", 1)[0].casefold() not in ("/пост", "/post"):
         return None
     action, _, topic = argument.partition(" ")
-    return topic.strip() if action.casefold() in ("новый", "new", "черновик", "draft") else None
+    return topic.strip() if action.casefold() in ("новый", "new", "черновик", "draft", "авто", "auto") else None
 
 
 class TelegramRunner:
@@ -115,6 +115,8 @@ class TelegramRunner:
             return
         chat, sender, text, callback_id = message_from_update(update)
         update_id = update["update_id"]
+        if self.app.comments.accept(update):
+            return
         if (chat.get("type") != "private" or sender.get("is_bot")
                 or sender.get("id") != self.app.settings.owner_id or not text):
             self.app.store.accept_update(update_id, chat.get("id", 0), "", "ignored")
@@ -155,7 +157,8 @@ class TelegramRunner:
                 elif topic is None:
                     result = self.app.reply(job["text"], expected_revision=revision)
                 else:
-                    draft = self.app.channel.generate(expected_revision=revision, topic=topic)
+                    action = job["text"].strip().partition(" ")[2].partition(" ")[0].casefold()
+                    draft = self.app.channel.generate(expected_revision=revision, topic=topic, auto_role=action in ("авто", "auto"))
                     result = {"reply": f"Черновик {draft['id']} · не опубликован\n\n" + self.app.channel.formatted(draft),
                               "_revision": revision}
                 with self.delivery_lock:
@@ -166,6 +169,9 @@ class TelegramRunner:
                 error_revision = getattr(exc, "response_revision", revision)
                 self.app.store.job_status(job["update_id"], "ready", str(exc), type(exc).__name__, revision=error_revision)
         self.deliver()
+        if not jobs:
+            self.app.comments.sync(self.api)
+            self.app.comments.work_once(self.api)
 
     def deliver(self):
         with self.delivery_lock:
