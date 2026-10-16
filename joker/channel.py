@@ -309,11 +309,11 @@ class ChannelService:
             raise ChannelError("Пост уже отправляется, закрыт или требует проверки доставки.")
         try:
             api = self.telegram()
-            caption = text + "\nИИ-фото"
+            caption = text
             compact = bool(photo and len(caption.encode("utf-16-le")) // 2 <= 1024)
             if photo:
                 name = payload.get("role_profile", self.app.masks[payload["mask"]])["display_name"]
-                sent = api.upload_photo(target["id"], photo, caption if compact else payload["title"] + "\n\nИИ-фото · вымышленный образ · " + name)
+                sent = api.upload_photo(target["id"], photo, caption if compact else payload["title"] + "\n\n" + name + " · Вымышленный образ")
                 photo_id = sent["message_id"]
                 self.store.update_channel_post(post_id, photo_message_id=photo_id)
                 if not compact:

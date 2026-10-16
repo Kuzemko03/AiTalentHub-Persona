@@ -103,8 +103,17 @@ class CommentService:
         if post_id:
             self._map(chat["id"], message["message_id"], post_id)
         sender, text = message.get("from", {}), message.get("text", "")
+        sender_chat = message.get("sender_chat", {})
+        actor_id = None
+        if sender_chat:
+            # Telegram supplies a fake `from` user for comments sent as a channel.
+            if (sender_chat.get("type") == "channel" or sender_chat.get("type") == "supergroup" and sender_chat.get("id") == chat["id"]):
+                if isinstance(sender_chat.get("id"), int) and sender_chat["id"] < 0 and sender.get("id") != binding["bot_id"]:
+                    actor_id = sender_chat["id"]
+        elif not sender.get("is_bot"):
+            actor_id = sender.get("id")
         from .channel import SECRET
-        valid = (post_id and not sender.get("is_bot") and sender.get("id") and not message.get("sender_chat")
+        valid = (post_id and actor_id and not message.get("is_automatic_forward") and not message.get("sender_business_bot")
                  and isinstance(text, str) and 1 <= len(text.strip()) <= 2000
                  and not text.lstrip().startswith("/") and not SECRET.search(text))
         if not valid:
@@ -112,13 +121,13 @@ class CommentService:
             return True
         cutoff = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(timespec="seconds")
         with self.store.lock, self.store.db:
-            recent = self.store.db.execute("SELECT COUNT(*) FROM comment_jobs WHERE user_id=? AND at>=?", (sender["id"], cutoff)).fetchone()[0]
+            recent = self.store.db.execute("SELECT COUNT(*) FROM comment_jobs WHERE user_id=? AND at>=?", (actor_id, cutoff)).fetchone()[0]
             pending = self.store.db.execute("SELECT COUNT(*) FROM comment_jobs WHERE status IN ('pending','running','ready')").fetchone()[0]
             daily = self.store.db.execute("SELECT COUNT(*) FROM comment_jobs WHERE at LIKE ?", (self.store.now()[:10] + "%",)).fetchone()[0]
             if recent < 3 and pending < 20 and daily < 50:
                 self.store.db.execute("INSERT OR IGNORE INTO comment_jobs(update_id,chat_id,message_id,post_id,user_id,text,status,at) "
                                       "VALUES (?,?,?,?,?,?,'pending',?)", (update_id, chat["id"], message["message_id"], post_id,
-                                                                           sender["id"], text.strip(), self.store.now()))
+                                                                           actor_id, text.strip(), self.store.now()))
             offset = max(update_id + 1, self.store.get("telegram_offset", 0))
             self.store.db.execute("INSERT OR REPLACE INTO settings VALUES ('telegram_offset',?)", (json.dumps(offset),))
         return True

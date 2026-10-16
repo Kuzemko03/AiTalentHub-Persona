@@ -157,6 +157,26 @@ class CommentTests(unittest.TestCase):
             self.service.accept(self.update(index + 1))
         self.assertEqual(self.app.store.db.execute("SELECT COUNT(*) FROM comment_jobs").fetchone()[0], 3)
 
+    def test_channel_comments_use_channel_identity_and_keep_owner_commands_private(self):
+        channel_sender = {"sender_chat": {"id": -100555, "type": "channel"},
+                          "from": {"id": 888, "is_bot": True}}
+        self.service.accept(self.update(1, **channel_sender))
+        self.service.work_once(self.api)
+        self.assertEqual(len(self.api.sent), 1)
+        self.assertEqual(self.app.store.db.execute("SELECT user_id FROM comment_jobs").fetchone()[0], -100555)
+        self.service.accept(self.update(2, text="/mask engineer", **channel_sender))
+        self.service.accept(self.update(3, **{**channel_sender, "from": {"id": 9, "is_bot": True}}))
+        self.service.accept(self.update(4, is_automatic_forward=True, **channel_sender))
+        self.service.work_once(self.api)
+        self.assertEqual(len(self.api.sent), 1)
+        self.assertEqual(self.app.active, "joker")
+
+    def test_different_channels_do_not_share_fake_sender_rate_limit(self):
+        for index in range(8):
+            self.service.accept(self.update(index + 1, sender_chat={"id": -100100 - index // 4, "type": "channel"},
+                                            **{"from": {"id": 888, "is_bot": True}}))
+        self.assertEqual(self.app.store.db.execute("SELECT COUNT(*) FROM comment_jobs").fetchone()[0], 6)
+
     def test_two_workers_claim_comment_only_once(self):
         self.service.accept(self.update())
         other = App(self.app.settings, Backend())
