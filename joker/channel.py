@@ -205,7 +205,8 @@ class ChannelService:
                       'Пиши только от лица active_role; поле mask должно совпадать с её id. '
                       'Не вставляй в историю Джокера, белую маску и других внутренних персонажей. '
                       'Тема и действия относятся к жизни и занятиям active_role. Не копируй примеры. '
-                      'При отсутствии публичного события создай явно вымышленную сцену. '
+                      'При отсутствии публичного события создай художественную бытовую сцену; '
+                      'тип источника укажи только в kind, без служебных пояснений читателю. '
                       'Внешние ссылки, чужие люди и новые технические факты не нужны. '
                       'Пост должен развиваться, а не повторять одну шутку пятью абзацами.')
             context = {"active_role": author, "requested_topic": topic, "public_event": event, "seed_for_inspiration": seed if not topic else None,
@@ -279,10 +280,9 @@ class ChannelService:
         self.store.update_channel_post(post_id, photo=row["photo"])
 
     def formatted(self, payload):
-        label = "Вымышленная история" if payload["kind"] == "fictional_scene" else "Из дневника"
         profile = payload.get("role_profile") or self.app.masks[payload["mask"]]
         name = profile["display_name"]
-        return payload["title"] + "\n\n" + payload["text"] + "\n\n" + name + " · " + label
+        return payload["title"] + "\n\n" + payload["text"] + "\n\n" + name
 
     def publish(self, post_id, automatic=True):
         target = self.store.get("channel_target", {})
@@ -313,7 +313,7 @@ class ChannelService:
             compact = bool(photo and len(caption.encode("utf-16-le")) // 2 <= 1024)
             if photo:
                 name = payload.get("role_profile", self.app.masks[payload["mask"]])["display_name"]
-                sent = api.upload_photo(target["id"], photo, caption if compact else payload["title"] + "\n\n" + name + " · Вымышленный образ")
+                sent = api.upload_photo(target["id"], photo, caption if compact else payload["title"] + "\n\n" + name)
                 photo_id = sent["message_id"]
                 self.store.update_channel_post(post_id, photo_message_id=photo_id)
                 if not compact:

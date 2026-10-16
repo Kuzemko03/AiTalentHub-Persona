@@ -149,7 +149,7 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual(saved["author"], "Марина")
         self.assertIn("сварщица", saved["image_prompt"])
         self.assertIn("Natural visible human face", saved["image_prompt"])
-        self.assertTrue(self.service.formatted(saved).endswith("Марина · Вымышленная история"))
+        self.assertTrue(self.service.formatted(saved).endswith("\n\nМарина"))
 
     def test_editing_pass_uses_two_reservations_and_fails_closed_at_quota(self):
         self.app.settings.daily_requests = 1
@@ -261,7 +261,7 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual([p[0] for p in self.api.sent], ["photo", "text"])
         self.assertEqual(result["status"], "published")
         self.assertEqual((result["photo_message_id"], result["text_message_id"]), (41, 42))
-        self.assertIn("Вымышленная история", self.api.sent[-1][1]["text"])
+        self.assertTrue(self.api.sent[-1][1]["text"].endswith("\n\nДжокер"))
 
     def test_ambiguous_delivery_never_retries_and_pauses_new_issues(self):
         post = self.draft(photo=True)
