@@ -63,7 +63,7 @@ class TelegramAPI:
 def keyboard(app):
     masks = app.status()["masks"]
     rows = [[{"text": m["name"], "callback_data": "mask:" + m["id"]}]
-            for m in masks if m["id"] != "joker"]
+            for m in masks[-12:] if m["id"] != "joker"]
     rows.append([{"text": "Джокер", "callback_data": "mask:joker"},
                  {"text": "Стоп", "callback_data": "stop"},
                  {"text": "Статус", "callback_data": "status"}])
@@ -129,7 +129,7 @@ class TelegramRunner:
             else:
                 try:
                     # Model work belongs in the worker; polling must remain available for Stop.
-                    result = None if editorial_topic(text) is not None else self.app.command(text)
+                    result = None if editorial_topic(text) is not None or self.app.needs_role_generation(text) else self.app.command(text)
                 except ValueError as exc:
                     result = str(exc)
             if result is not None:
@@ -149,7 +149,10 @@ class TelegramRunner:
                 pass  # This hint is optional; it must never strand a running job.
             try:
                 topic = editorial_topic(job["text"])
-                if topic is None:
+                if self.app.needs_role_generation(job["text"]):
+                    reply = self.app.command(job["text"], expected_revision=revision)
+                    result = {"reply": reply, "_revision": self.app.store.get("response_revision", 0)}
+                elif topic is None:
                     result = self.app.reply(job["text"], expected_revision=revision)
                 else:
                     draft = self.app.channel.generate(expected_revision=revision, topic=topic)
@@ -160,7 +163,8 @@ class TelegramRunner:
             except Cancelled:
                 self.app.store.job_status(job["update_id"], "cancelled")
             except (ModelError, ValueError) as exc:
-                self.app.store.job_status(job["update_id"], "ready", str(exc), type(exc).__name__, revision=revision)
+                error_revision = getattr(exc, "response_revision", revision)
+                self.app.store.job_status(job["update_id"], "ready", str(exc), type(exc).__name__, revision=error_revision)
         self.deliver()
 
     def deliver(self):

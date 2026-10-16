@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .backends import Cancelled, ModelError
 from .telegram_bot import TelegramError
+from .roles import portrait_path
 
 
 class BoundedServer(ThreadingHTTPServer):
@@ -80,6 +81,16 @@ def make_server(app, port=None):
                 self.write_body(raw)
             elif self.path == "/api/status":
                 self.respond(app.status())
+            elif self.path.startswith("/api/role/photo/"):
+                path = portrait_path(app.settings.root, self.path.removeprefix("/api/role/photo/"))
+                if path is None:
+                    return self.respond({"error": "Фотография роли не найдена"}, 404)
+                raw = path.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.write_body(raw)
             elif self.path.startswith("/api/channel/photo/"):
                 try:
                     post_id = self.path.removeprefix("/api/channel/photo/")

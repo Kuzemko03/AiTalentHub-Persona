@@ -1,0 +1,44 @@
+{
+  "fictional_inputs_only": true,
+  "published": false,
+  "results": [
+    {
+      "case": "plumber",
+      "reply": "Михалыч. Сантехник я — сначала смотрю, где течёт, а потом уже берусь за ключи.",
+      "latency": 7.67
+    },
+    {
+      "case": "housewife",
+      "reply": "Я Валентина Петровна, дома хозяйничаю: готовлю, порядок поддерживаю, чтобы всем было уютно. А то без женской руки в доме быстро начинается такое, что и чайник не найти.",
+      "latency": 5.53
+    },
+    {
+      "case": "new_role",
+      "request": "Джокер, стань экскурсоводом Ниной, 41 год. Спокойная, любит замечать смешные бытовые детали. Рыжие волосы, веснушки, синяя куртка.",
+      "confirmation": "Здравствуйте, я Нина. Пока будем идти, покажу не только красивые виды, но и пару занятных мелочей по дороге.",
+      "profile": {
+        "display_name": "Нина",
+        "role": "Экскурсовод, 41 год",
+        "traits": "Спокойная и наблюдательная; с мягким юмором подмечает смешные бытовые детали, не превращая их в насмешку.",
+        "speech_style": "Говорит ровно и доброжелательно, описывает место через живые мелочи и ненавязчивые забавные наблюдения. Без суеты и громких шуток.",
+        "visual_description": "A 41-year-old woman with a naturally open face, light freckles, and shoulder-length red hair. Average build. She usually wears a practical blue jacket and comfortable walking shoes.",
+        "confirmation": "Здравствуйте, я Нина. Пока будем идти, покажу не только красивые виды, но и пару занятных мелочей по дороге.",
+        "id": "custom_850a5e257fc2",
+        "aliases": [
+          "экскурсоводом Ниной, 41 год. Спокойная, любит замечать смешные бытовые детали. Рыжие волосы, веснушки, синяя куртка"
+        ]
+      },
+      "reply": "Я Нина, экскурсовод: люблю показывать людям интересные места и замечать по дороге всякие занятные мелочи. А тебя зовут Тимофей, верно?",
+      "latency": 5.11
+    },
+    {
+      "case": "plumber_draft_only",
+      "editing_pass": true,
+      "author": "Михалыч",
+      "title": "Кран капал, хозяин держал дверцу",
+      "text": "Пришёл чинить кран, а хозяин уже снял дверцу шкафа. Стоит с ней у стены и ждёт, пока я решу, куда её деть.\n\n— Чтобы вам удобнее было, — говорит.\n\nПод раковиной и правда стало просторнее: кастрюли вынуты, полка снята, стол отодвинут. Я попросил только убрать вещи из-под мойки. Хозяин кивнул и поставил рядом табурет. Пригодился он ему самому — присел, пока я работал.\n\nКран перестал капать. Хозяин посмотрел на пустую кухню, потом на дверцу у стены:\n\n— А это теперь куда?\n\nПоказал на шкаф. Он взял дверцу и понёс обратно.",
+      "image_prompt": "Use case: photorealistic-natural. Candid square editorial photograph of a fictional adult. Natural visible human face, ordinary skin texture, believable hands, clothing and objects. Show the person doing the specific action in their own everyday surroundings. Use an attached reference ONLY if it depicts this SAME role; preserve its face and age. Different roles are different people. No blank white face, theatrical mask, hooded avatar, DC Joker, face paint, plastic CGI skin, text, logos or fake chat screenshots. This is an AI-created fictional photograph, not documentary evidence. Identity: Fictional adult male plumber, about 48, stocky ordinary build, short dark hair graying at temples, broad expressive face, short salt-and-pepper stubble. Faded navy work overalls over a gray cotton T-shirt, worn leather tool belt, practical work shoes. Real visible human face, no mask, no hood. Calm focused expression.. Scene: A fictional 48-year-old stocky male plumber with short dark hair graying at the temples and salt-and-pepper stubble, wearing faded navy work overalls over a gray T-shirt and a worn leather tool belt, crouches beneath a kitchen sink after fixing a dripping faucet. In the background, a homeowner carries a cabinet door back toward the kitchen cabinet; a removed shelf and pots are set aside. Natural lived-in kitchen, realistic candid photography, visible face and hands, no mask or hood.",
+      "status": "draft"
+    }
+  ]
+}

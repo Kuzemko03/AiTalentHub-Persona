@@ -10,23 +10,23 @@ from pathlib import Path
 
 from .backends import Cancelled, ModelError
 from .telegram_bot import TelegramAPI, TelegramError
+from .roles import ROLE_ID, visual_description
 
 LOCAL_TZ = timezone(timedelta(hours=3), "Europe/Volgograd")
 SECRET = re.compile(r"\b(?:\d{8,12}:[A-Za-z0-9_-]{30,50}|gh[pousr]_[A-Za-z0-9]{25,}|sk-[A-Za-z0-9_-]{25,})\b")
-MASKS = ("joker", "housewife", "engineer", "locksmith")
 POST_SCHEMA = {"type": "object", "properties": {
     "title": {"type": "string"}, "text": {"type": "string"}, "image_scene": {"type": "string"},
-    "novelty_key": {"type": "string"}, "mask": {"type": "string", "enum": list(MASKS)},
+    "novelty_key": {"type": "string"}, "mask": {"type": "string"},
     "kind": {"type": "string", "enum": ["fictional_scene", "public_event"]}, "event_id": {"type": "string"}},
     "required": ["title", "text", "image_scene", "novelty_key", "mask", "kind", "event_id"], "additionalProperties": False}
 IMAGE_STYLE = (
-    "Use case: illustration-story. Single square cinematic tactile 3D editorial still. "
-    "Use all attached reference images as strict character references. The SAME one slim adult "
-    "Joker character, graphite hooded clothes and black gloves, perfectly smooth blank ivory "
-    "oval mask: no eyes, no mouth, no marks, not the DC character. Cozy workshop, "
-    "warm amber lighting, muted charcoal and plum. Clear action, believable hands and objects, "
-    "dry visual humor. No text, logos, watermarks, fake chat screenshots or extra people. "
-    "This is a fictional AI illustration, never documentary evidence. Scene: "
+    "Use case: photorealistic-natural. Candid square editorial photograph of a fictional adult. "
+    "Natural visible human face, ordinary skin texture, believable hands, clothing and objects. "
+    "Show the person doing the specific action in their own everyday surroundings. "
+    "Use an attached reference ONLY if it depicts this SAME role; preserve its face and age. "
+    "Different roles are different people. No blank white face, theatrical mask, hooded avatar, "
+    "DC Joker, face paint, plastic CGI skin, text, logos or fake chat screenshots. "
+    "This is an AI-created fictional photograph, not documentary evidence. Identity: "
 )
 
 
@@ -50,11 +50,19 @@ def validate_post(value):
         if not minimum <= len(text) <= maximum:
             raise ChannelError("Неверная длина поля публикации: " + key)
         result[key] = text
-    if value.get("mask") not in MASKS or value.get("kind") not in ("fictional_scene", "public_event"):
+    if not isinstance(value.get("mask"), str) or not ROLE_ID.fullmatch(value["mask"]) or value.get("kind") not in ("fictional_scene", "public_event"):
         raise ChannelError("Неверная маска или источник публикации.")
     result.update(mask=value["mask"], kind=value["kind"], event_id=value.get("event_id", ""))
     if not isinstance(result["event_id"], str):
         raise ChannelError("Неверный источник события.")
+    if "role_profile" in value:
+        profile = value["role_profile"]
+        if not isinstance(profile, dict):
+            raise ChannelError("Неверный профиль автора.")
+        result["role_profile"] = {key: public_text(profile.get(key, "")) for key in
+                                  ("display_name", "role", "traits", "speech_style", "visual_description")}
+        if any(len(v) > 1200 for v in result["role_profile"].values()):
+            raise ChannelError("Профиль автора слишком длинный.")
     return result
 
 
@@ -108,18 +116,22 @@ class ChannelService:
 
     def view(self, row):
         payload = json.loads(row["payload"])
+        profile = payload.get("role_profile") or self.app.masks.get(payload["mask"], self.app.masks["joker"])
         return {"id": row["id"], "status": row["status"], "created_at": row["created_at"],
                 "published_at": row["published_at"], "has_photo": bool(row["photo"]),
                 "photo_url": "/api/channel/photo/" + row["id"] if row["photo"] else "",
                 "photo_message_id": row["photo_message_id"], "text_message_id": row["text_message_id"],
-                **payload, "image_prompt": IMAGE_STYLE + payload["image_scene"]}
+                **payload, "author": profile["display_name"],
+                "image_prompt": IMAGE_STYLE + visual_description(profile) + ". Scene: " + payload["image_scene"]}
 
     def status(self):
         rows = self.store.channel_posts(30)
         attention = self.store.channel_attention()
         return {"target": self.store.get("channel_target", {}), "enabled": self.store.get("channel_enabled", False),
                 "schedule": "12:00 и 20:00 · Europe/Volgograd" if self.store.get("channel_enabled", False) else "Только ручная публикация", "attention": attention,
-                "events_waiting": len(self.store.channel_events()), "posts": [self.view(p) for p in rows[:8]]}
+                "author": self.app.masks[self.app.active]["display_name"],
+                "events_waiting": len(self.store.channel_events()),
+                "posts": [self.view(p) for p in rows if p["status"] in ("draft", "publishing", "uncertain")][:8]}
 
     def add_event(self, text):
         text = public_text(text)
@@ -131,6 +143,13 @@ class ChannelService:
 
     def save(self, payload, post_id=None):
         payload = validate_post(payload)
+        if payload["mask"] not in self.app.masks:
+            raise ChannelError("Роль автора не найдена.")
+        if "role_profile" not in payload:
+            mask = self.app.masks[payload["mask"]]
+            payload["role_profile"] = {key: mask.get(key, "") for key in
+                                       ("display_name", "role", "traits", "speech_style", "visual_description")}
+            payload["role_profile"]["visual_description"] = visual_description(mask)
         if payload["kind"] == "public_event":
             event = next((e for e in self.store.channel_events() if e["id"] == payload["event_id"]), None)
             if not event:
@@ -160,6 +179,7 @@ class ChannelService:
                     raise Cancelled("Подготовка поста отменена.")
                 self.app.active_cancel = cancel
                 call_id = self.store.reserve_call(self.app.settings.daily_requests)
+                author = dict(self.app.masks[self.app.active])
             root = self.app.settings.root
             recent = [json.loads(p["payload"]) for p in self.store.channel_posts(20)]
             events = self.store.channel_events()
@@ -171,20 +191,40 @@ class ChannelService:
                       + (root / "agent/joker/PERSONA.md").read_text(encoding="utf-8")
                       + '\nТы пишешь пост, а не ответ собеседнику. Верни JSON с полями title, text, image_scene '
                       '(описание одной сцены по-английски), novelty_key (суть нового конфликта), '
-                      'mask (joker/housewife/engineer/locksmith), kind (fictional_scene/public_event), event_id. '
+                      'mask (id текущего автора), kind (fictional_scene/public_event), event_id. '
                       'Не добавляй заголовок и подпись внутрь text: приложение добавит их само. '
-                      'Выбери маску и новый конфликт, отличный от истории ниже. Не копируй примеры. '
+                      'Пиши только от лица active_role; поле mask должно совпадать с её id. '
+                      'Не вставляй в историю Джокера, белую маску и других внутренних персонажей. '
+                      'Тема и действия относятся к жизни и занятиям active_role. Не копируй примеры. '
                       'При отсутствии публичного события создай явно вымышленную сцену. '
                       'Внешние ссылки, чужие люди и новые технические факты не нужны. '
                       'Пост должен развиваться, а не повторять одну шутку пятью абзацами.')
-            context = {"requested_topic": topic, "public_event": event, "seed_for_inspiration": seed if not topic else None,
+            context = {"active_role": author, "requested_topic": topic, "public_event": event, "seed_for_inspiration": seed if not topic else None,
                        "recent_public_editorial_material": recent}
             result = self.app.backend.generate(system, [{"role": "user", "content": json.dumps(context, ensure_ascii=False)}], cancel,
                                                schema=POST_SCHEMA)
             with self.app.guard:
                 if cancel.is_set() or revision != self.store.get("response_revision", 0):
                     raise Cancelled("Подготовка поста отменена.")
+                validate_post(result)
+                self.store.finish_call(call_id, {"status": "done", "purpose": "channel_draft", "model": result["model"],
+                                                "latency": result["latency"], "usage": result["usage"]})
+                call_id = None
+                call_id = self.store.reserve_call(self.app.settings.daily_requests)
+            editing = (system + "\nСейчас отредактируй уже написанный черновик. Сохрани тему, автора и источник. "
+                       "Найди самую искусственную реплику или метафору и замени обычной живой реакцией. "
+                       "Убери объяснение шутки, повторы и сценки, в которых люди ведут себя нелепо только ради панчлайна. "
+                       "Проверь, что бытовые действия имеют понятную причину и результат; не превращай ремонт в магическое 'покрутил и всё'. "
+                       "Не добавляй новых реальных фактов. Подтяни начало, если оно общее, и закончи на точной детали. "
+                       "Если фраза уже хорошая, сохрани её. Верни только улучшенный пост по той же JSON-схеме.")
+            edit_context = {**context, "draft_to_edit": validate_post(result)}
+            result = self.app.backend.generate(editing, [{"role": "user", "content": json.dumps(edit_context, ensure_ascii=False)}],
+                                               cancel, schema=POST_SCHEMA)
+            with self.app.guard:
+                if cancel.is_set() or revision != self.store.get("response_revision", 0):
+                    raise Cancelled("Подготовка поста отменена.")
                 payload = validate_post(result)
+                payload["mask"] = author["id"]
                 payload["kind"] = "public_event" if event else "fictional_scene"
                 payload["event_id"] = event["id"] if event else ""
                 saved = self.save(payload)
@@ -230,8 +270,9 @@ class ChannelService:
         self.store.update_channel_post(post_id, photo=row["photo"])
 
     def formatted(self, payload):
-        label = "Вымышленная сцена из мастерской" if payload["kind"] == "fictional_scene" else "Из дневника разработки"
-        name = self.app.masks[payload["mask"]]["display_name"]
+        label = "Вымышленная история" if payload["kind"] == "fictional_scene" else "Из дневника"
+        profile = payload.get("role_profile") or self.app.masks[payload["mask"]]
+        name = profile["display_name"]
         return payload["title"] + "\n\n" + payload["text"] + "\n\n" + name + " · " + label
 
     def publish(self, post_id, automatic=True):
@@ -260,7 +301,8 @@ class ChannelService:
         try:
             api = self.telegram()
             if photo:
-                sent = api.upload_photo(target["id"], photo, payload["title"] + "\n\nИИ-иллюстрация к дневнику Джокера")
+                name = payload.get("role_profile", self.app.masks[payload["mask"]])["display_name"]
+                sent = api.upload_photo(target["id"], photo, payload["title"] + "\n\nИИ-фото · вымышленный образ · " + name)
                 photo_id = sent["message_id"]
                 self.store.update_channel_post(post_id, photo_message_id=photo_id)
                 time.sleep(1.05)

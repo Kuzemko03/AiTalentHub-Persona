@@ -138,6 +138,30 @@ class ChannelTests(unittest.TestCase):
         self.assertFalse(self.service.status()["enabled"])
         self.assertEqual(self.service.next_draft()["action"], "idle")
 
+    def test_post_and_photo_keep_the_same_dynamic_role_after_switch(self):
+        self.app.command("/newmask Марина | сварщица | спокойная | коротко")
+        role_id = self.app.active
+        post = self.service.generate(topic="Про забытый инструмент")
+        self.assertEqual(post["mask"], role_id)
+        self.assertEqual(json.loads(self.backend.messages[0]["content"])["active_role"]["display_name"], "Марина")
+        self.app.switch("housewife")
+        saved = self.service.view(self.app.store.channel_post(post["id"]))
+        self.assertEqual(saved["author"], "Марина")
+        self.assertIn("сварщица", saved["image_prompt"])
+        self.assertIn("Natural visible human face", saved["image_prompt"])
+        self.assertTrue(self.service.formatted(saved).endswith("Марина · Вымышленная история"))
+
+    def test_editing_pass_uses_two_reservations_and_fails_closed_at_quota(self):
+        self.app.settings.daily_requests = 1
+        with self.assertRaises(ValueError):
+            self.service.generate(topic="Забытый инструмент")
+        self.assertFalse(self.service.status()["posts"])
+        self.assertFalse(self.app.status()["generating"])
+        self.assertFalse(self.api.sent)
+        row = self.app.store.db.execute("SELECT result FROM calls").fetchone()
+        self.assertEqual(json.loads(row[0])["purpose"], "channel_draft")
+        self.assertEqual(json.loads(row[0])["status"], "done")
+
     def test_telegram_editorial_is_deferred_and_can_be_stopped(self):
         api = Mock()
         runner = TelegramRunner(self.app, api)
@@ -220,7 +244,7 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual([p[0] for p in self.api.sent], ["photo", "text"])
         self.assertEqual(result["status"], "published")
         self.assertEqual((result["photo_message_id"], result["text_message_id"]), (41, 42))
-        self.assertIn("Вымышленная сцена", self.api.sent[-1][1]["text"])
+        self.assertIn("Вымышленная история", self.api.sent[-1][1]["text"])
 
     def test_ambiguous_delivery_never_retries_and_pauses_new_issues(self):
         post = self.draft(photo=True)

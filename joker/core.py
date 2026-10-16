@@ -1,6 +1,5 @@
 """One character, data-driven masks, private memory, bounded model calls."""
 import json
-import re
 import threading
 import uuid
 
@@ -8,9 +7,10 @@ from .backends import Cancelled, ModelError, make_backend
 from .config import Settings
 from .store import Store
 from .telegram_bot import TelegramError
+from .roles import RoleService, find_role, portrait_path, role_request, visual_description
 
-HELP = ("Я Джокер. Выбери маску кнопкой или скажи «будь домохозяйкой», «будь ИИ-инженером», "
-        "«будь слесарем».\n/статус — состояние\n/сброс — вернуться к Джокеру\n"
+HELP = ("Напиши «Джокер, стань сантехником» или опиши своего человека: имя, характер, речь и внешность. "
+        "Роли можно менять прямо в разговоре.\n/роли — сохранённые роли\n/статус — состояние\n/сброс — вернуться к Джокеру\n"
         "/стоп — остановить ответ\n/remember факт — сохранить факт\n"
         "/newmask Имя | роль | характер | манера речи — новая маска.\n"
         "Сейчас работаю в текстовом чате; подключение Minecraft — следующий этап.\n"
@@ -35,10 +35,14 @@ class App:
         self.telegram_status = {"state": "disabled", "detail": "Telegram не запущен"}
         from .channel import ChannelService
         self.channel = ChannelService(self)
+        self.roles = RoleService(self)
 
     @property
     def active(self):
-        return self.store.get("active_mask", "joker")
+        selected = self.store.get("active_mask", "joker")
+        if selected not in self.masks:
+            self.masks.update(self.store.get("custom_masks", {}))
+        return selected if selected in self.masks else "joker"
 
     def stop(self):
         with self.guard:
@@ -58,7 +62,11 @@ class App:
             self.store.set("mask_revision", self.store.get("mask_revision", 0) + 1)
             self.store.set("response_revision", self.store.get("response_revision", 0) + 1)
             self.store.cancel_pending()
-            return self.masks[mask_id]["confirmation"]
+            mask = self.masks[mask_id]
+            confirmation = mask["confirmation"]
+            if any(word in confirmation.casefold() for word in ("маск", "память", "персонаж", "в этой роли")):
+                return mask["display_name"] + ". Слушаю."
+            return confirmation
 
     def status(self, actor="owner"):
         with self.guard:
@@ -74,11 +82,19 @@ class App:
                 "reasoning": self.settings.reasoning if self.settings.backend == "codex" else None,
                 "telegram": dict(self.telegram_status),
                 "channel": self.channel.status(),
+                "role": mask["role"], "visual_description": visual_description(mask),
+                "portrait_url": "/api/role/photo/" + mask["id"] if portrait_path(self.settings.root, mask["id"]) else "",
                 "last_call": self.store.get("last_call", {}),
                 "masks": [{"id": m["id"], "name": m["display_name"], "role": m["role"]}
                           for m in self.masks.values()]}
 
-    def command(self, text, actor="owner", owner=True):
+    def needs_role_generation(self, text):
+        with self.guard:
+            self.masks.update(self.store.get("custom_masks", {}))
+        requested = role_request(text)
+        return requested is not None and find_role(self.masks, requested) is None
+
+    def command(self, text, actor="owner", owner=True, expected_revision=None):
         if not isinstance(text, str) or not text.strip() or len(text) > 4000:
             raise ValueError("Сообщение должно содержать от 1 до 4000 символов.")
         text = text.strip()
@@ -87,6 +103,8 @@ class App:
         token = token.split("@", 1)[0].casefold()
         if not owner:
             return "Управление персонажем доступно владельцу."
+        with self.guard:
+            self.masks.update(self.store.get("custom_masks", {}))
         if token in ("/канал", "/channel", "/автопост", "/autopost", "/событие", "/event", "/пост", "/post"):
             try:
                 return self.channel.command(text)
@@ -101,6 +119,8 @@ class App:
             return f"Маска: {s['name']}. Память: {len(s['memory'])} фактов. Minecraft: {s['minecraft']}."
         if token in ("/reset", "/сброс"):
             return self.switch("joker")
+        if token in ("/roles", "/роли"):
+            return "\n".join(m["display_name"] + " — " + m["role"] for m in self.masks.values())
         if token in ("/memory", "/память"):
             return "\n".join(self.store.facts(actor)) or "Сохранённых фактов пока нет."
         if token == "/remember":
@@ -116,11 +136,11 @@ class App:
             mask_id = "custom_" + uuid.uuid4().hex[:8]
             mask = {"id": mask_id, "display_name": parts[0], "role": parts[1],
                     "traits": parts[2], "speech_style": parts[3], "aliases": [],
-                    "confirmation": f"Теперь я {parts[0]}. Маска изменилась, память сохранилась."}
+                    "confirmation": f"{parts[0]} на связи. С чего начнём?"}
             with self.guard:
                 custom = self.store.get("custom_masks", {})
-                if len(custom) >= 20:
-                    return "Достигнут лимит 20 пользовательских масок."
+                if len(custom) >= 100:
+                    return "Сохранено 100 своих ролей. Вернись к нужной по имени."
                 custom[mask_id] = mask
                 self.store.set("custom_masks", custom)
                 self.masks[mask_id] = mask
@@ -129,16 +149,15 @@ class App:
         if token in ("/mask", "/маска"):
             requested = argument.casefold()
         else:
-            match = re.fullmatch(r"(?:джокер[ ,]+)?(?:будь|стань)\s+(.+?)[.!]?", lower)
-            if match:
-                requested = match.group(1)
+            requested = role_request(text)
         if requested:
             with self.guard:
-                masks = list(self.masks.values())
-            for mask in masks:
-                if requested in [mask["id"], mask["display_name"].casefold(), *mask.get("aliases", [])]:
-                    return self.switch(mask["id"])
-            return "Не нашёл такую маску. Выбери готовую или используй /newmask."
+                found = find_role(self.masks, requested)
+            if found:
+                return self.switch(found)
+            if token in ("/mask", "/маска"):
+                return "Такой роли пока нет. Напиши: Джокер, стань … — и опиши её."
+            return self.roles.adopt(requested, expected_revision=expected_revision)
         if token.startswith("/"):
             return "Неизвестная команда. /help покажет доступные команды."
         return None
@@ -175,7 +194,8 @@ class App:
                 cancel = threading.Event()
                 self.active_cancel = cancel
                 history = self.store.history(actor)
-                messages = [{"role": m["role"], "content": m["content"]} for m in history]
+                messages = [{"role": m["role"], "content": m["content"]} for m in history
+                            if m["role"] != "assistant" or m["mask"] == mask_id]
                 messages.append({"role": "user", "content": text})
                 self.store.append(actor, "user", text, mask_id)
             try:

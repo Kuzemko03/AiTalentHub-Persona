@@ -88,7 +88,8 @@ class RuntimeTests(unittest.TestCase):
         self.app = App(self.settings, FakeBackend())
         self.assertEqual(self.app.active, mask_id)
         self.assertEqual(self.app.masks[mask_id]["display_name"], "Эхо")
-        self.assertEqual(len(list((self.root / "agent/joker/masks").glob("*.json"))), 4)
+        self.assertEqual(len(list((self.root / "agent/joker/masks").glob("*.json"))),
+                         len(list((ROOT / "agent/joker/masks").glob("*.json"))))
 
     def test_stop_discards_model_reply_and_keeps_memory(self):
         started, release = threading.Event(), threading.Event()
