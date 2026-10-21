@@ -2,11 +2,13 @@
 import json
 import secrets
 import threading
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .backends import Cancelled, ModelError
 from .telegram_bot import TelegramError
 from .roles import portrait_path
+from .memory import MemoryConflict
 
 
 class BoundedServer(ThreadingHTTPServer):
@@ -81,6 +83,23 @@ def make_server(app, port=None):
                 self.write_body(raw)
             elif self.path == "/api/status":
                 self.respond(app.status())
+            elif self.path.partition("?")[0] in ("/api/memory", "/api/memory/export"):
+                try:
+                    route = urllib.parse.urlsplit(self.path)
+                    query = urllib.parse.parse_qs(route.query, max_num_fields=4)
+                    scope = query.get("scope", ["private"])[0]
+                    actor = app.memory.scope(scope)
+                    if route.path == "/api/memory":
+                        return self.respond(app.memory.list(actor))
+                    raw = json.dumps(app.memory.export(actor), ensure_ascii=False, indent=2).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Disposition", 'attachment; filename="joker-memory-' + scope + '.json"')
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.write_body(raw)
+                except ValueError:
+                    self.respond({"error": "Неверная область памяти."}, 400)
             elif self.path.startswith("/api/role/photo/"):
                 path = portrait_path(app.settings.root, self.path.removeprefix("/api/role/photo/"))
                 if path is None:
@@ -159,6 +178,30 @@ def make_server(app, port=None):
                     if action not in ("on", "off"):
                         raise ValueError("Неизвестное действие.")
                     self.respond(app.handle("/голос " + action))
+                elif self.path == "/api/memory":
+                    actor = app.memory.scope(value.get("scope", "private"))
+                    action = value.get("action")
+                    if action == "list":
+                        return self.respond(app.memory.list(actor, value.get("query", ""), value.get("offset", 0)))
+                    if action == "read":
+                        return self.respond(app.memory.get(actor, value["id"]))
+                    if action == "save":
+                        note = app.memory.save(actor, title=value["title"], body=value["body"],
+                            kind=value.get("kind", "note"), tags=value.get("tags", []), pinned=value.get("pinned", False),
+                            note_id=value.get("id"), version=value.get("version"))
+                        return self.respond({"reply": "Заметка сохранена.", "note": note})
+                    if action == "delete":
+                        app.memory.delete(actor, value["id"], value["version"])
+                        return self.respond({"reply": "Заметка удалена. История беседы сохраняется."})
+                    if action in ("link", "unlink"):
+                        note = app.memory.link(actor, value["id"], value["target"], value.get("label", "связано"),
+                                               value["version"], remove=action == "unlink")
+                        return self.respond({"reply": "Связи обновлены.", "note": note})
+                    if action == "forget":
+                        removed = app.memory.forget_fact(actor, value["fact"])
+                        return self.respond({"reply": "Факт убран из сохранённой памяти. История беседы сохраняется."
+                                             if removed else "Такого сохранённого факта нет."})
+                    raise ValueError("Неизвестное действие с памятью.")
                 elif self.path == "/api/channel/bind":
                     info = app.channel.bind(value["target"])
                     self.respond({"reply": "Канал подключён: " + info["title"]})
@@ -184,6 +227,8 @@ def make_server(app, port=None):
                     self.respond({"error": "Не найдено"}, 404)
             except Cancelled:
                 self.respond({"cancelled": True, "reply": "Предыдущий ответ отменён."})
+            except MemoryConflict as exc:
+                self.respond({"error": str(exc)}, 409)
             except ModelError as exc:
                 self.respond({"error": str(exc)}, 503)
             except TelegramError as exc:

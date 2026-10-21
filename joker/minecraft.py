@@ -11,7 +11,8 @@ from .game_tasks import advance, TERMINAL, owner_distance
 NICK = re.compile(r"[A-Za-z0-9_]{3,16}\Z")
 STOP = {"стоп", "хватит", "отмена", "/stop", "/стоп", "подожди здесь", "жди здесь"}
 CONTROL = {"/mask", "/маска", "/reset", "/сброс", "/roles", "/роли", "/status", "/статус",
-           "/сон", "/sleep", "/проснись", "/wake"}
+           "/сон", "/sleep", "/проснись", "/wake", "/заметка", "/note", "/заметки", "/notes",
+           "/найди", "/find", "/забудь", "/forget", "/связь", "/link"}
 ITEMS = {"дуб": "oak_log", "дуба": "oak_log", "дубовых брёвен": "oak_log",
          "дубовых бревен": "oak_log", "oak_log": "oak_log", "брёвна": "oak_log",
          "бревна": "oak_log", "булыжник": "cobblestone", "булыжника": "cobblestone",

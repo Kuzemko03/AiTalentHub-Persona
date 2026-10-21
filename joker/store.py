@@ -40,6 +40,17 @@ class Store:
                   update_id INTEGER PRIMARY KEY, chat_id INTEGER, message_id INTEGER,
                   post_id TEXT, user_id INTEGER, text TEXT, status TEXT, at TEXT,
                   reply TEXT DEFAULT '', reply_message_id INTEGER, error TEXT DEFAULT '', revision INTEGER);
+                CREATE TABLE IF NOT EXISTS memory_notes (
+                  id TEXT PRIMARY KEY, actor TEXT NOT NULL, kind TEXT NOT NULL,
+                  title TEXT NOT NULL, body TEXT NOT NULL, tags TEXT NOT NULL,
+                  pinned INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1,
+                  created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS memory_actor ON memory_notes(actor,updated_at);
+                CREATE TABLE IF NOT EXISTS memory_links (
+                  actor TEXT NOT NULL, source TEXT NOT NULL, target TEXT NOT NULL,
+                  label TEXT NOT NULL, PRIMARY KEY(source,target));
+                CREATE INDEX IF NOT EXISTS memory_link_target ON memory_links(actor,target);
+                CREATE INDEX IF NOT EXISTS facts_actor ON facts(actor,at);
             """)
 
     def recover_jobs(self):
