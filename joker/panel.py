@@ -134,6 +134,12 @@ def make_server(app, port=None):
                     self.respond({"reply": app.switch(value["id"])})
                 elif self.path == "/api/stop":
                     self.respond({"reply": app.stop()})
+                elif self.path == "/api/game":
+                    actions = {"follow": "за мной", "oak": "принеси 16 дубовых брёвен", "stop": "стоп"}
+                    action = value.get("action")
+                    if not isinstance(action, str) or action not in actions:
+                        raise ValueError("Неизвестное игровое действие.")
+                    self.respond(app.handle(actions[action]))
                 elif self.path == "/api/channel/bind":
                     info = app.channel.bind(value["target"])
                     self.respond({"reply": "Канал подключён: " + info["title"]})

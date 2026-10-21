@@ -36,6 +36,11 @@ class Settings:
     api_url: str = "https://api.mistral.ai/v1"
     api_model: str = ""
     api_key: str = ""
+    minecraft_enabled: bool = False
+    minecraft_owner: str = ""
+    minecraft_bot: str = ""
+    minecraft_port: int = 25333
+    minecraft_callback_port: int = 25334
 
     @classmethod
     def load(cls, root: Path = ROOT):
@@ -50,4 +55,9 @@ class Settings:
                    panel_port=int(values.get("PANEL_PORT", "8765")),
                    daily_requests=int(values.get("MAX_DAILY_REQUESTS", "100")),
                    api_url=values.get("LLM_BASE_URL", "https://api.mistral.ai/v1"),
-                   api_model=values.get("LLM_MODEL", ""), api_key=values.get("LLM_API_KEY", ""))
+                   api_model=values.get("LLM_MODEL", ""), api_key=values.get("LLM_API_KEY", ""),
+                   minecraft_enabled=values.get("MINECRAFT_ENABLED", "0").casefold() in ("1", "true"),
+                   minecraft_owner=values.get("MINECRAFT_OWNER", ""),
+                   minecraft_bot=values.get("MINECRAFT_BOT", ""),
+                   minecraft_port=int(values.get("MINECRAFT_PORT", "25333")),
+                   minecraft_callback_port=int(values.get("MINECRAFT_CALLBACK_PORT", "25334")))

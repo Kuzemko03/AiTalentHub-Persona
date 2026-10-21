@@ -17,23 +17,41 @@ def main():
         cli(sys.argv[2:])
         return
     parser = argparse.ArgumentParser(description="Джокер — персонаж со сменяемыми масками")
-    parser.add_argument("mode", choices=["chat", "serve", "telegram", "pair", "doctor", "ask"], nargs="?", default="chat")
+    parser.add_argument("mode", choices=["chat", "serve", "telegram", "minecraft", "pair", "doctor", "ask"], nargs="?", default="chat")
     parser.add_argument("text", nargs="?")
     parser.add_argument("--telegram", action="store_true", help="подключить Telegram вместе с панелью")
+    parser.add_argument("--minecraft", action="store_true", help="подключить Minecraft через UnionClef")
     args = parser.parse_args()
     settings = Settings.load()
     if args.mode == "pair":
         pair(settings)
         return
     if args.mode == "doctor":
+        from .minecraft import probe
         print(json.dumps({"backend": settings.backend, "model": settings.model,
                           "codex_found": bool(settings.codex_bin or shutil.which("codex")),
                           "telegram_token_configured": bool(settings.telegram_token),
                           "owner_configured": bool(settings.owner_id),
                           "panel": f"http://127.0.0.1:{settings.panel_port}",
-                          "minecraft": "not connected"}, ensure_ascii=False, indent=2))
+                          "minecraft": probe(settings)}, ensure_ascii=False, indent=2))
         return
     app = App(settings)
+    try:
+        if args.minecraft or args.mode == "minecraft" or settings.minecraft_enabled:
+            app.minecraft.start()
+        run_app(app, args, parser)
+    finally:
+        if args.mode == "serve" or app.minecraft.thread is not None:
+            app.stop()
+        app.minecraft.close()
+
+
+def run_app(app, args, parser):
+    settings = app.settings
+    if args.mode == "minecraft":
+        print("Minecraft: ожидаю UnionClef на 127.0.0.1. Ctrl+C — выход.", flush=True)
+        app.minecraft.shutdown.wait()
+        return
     if args.mode == "ask":
         if not args.text:
             parser.error("Для ask нужен текст сообщения.")
@@ -75,7 +93,6 @@ def main():
         finally:
             if runner:
                 runner.shutdown.set()
-            app.stop()
             server.server_close()
 
 

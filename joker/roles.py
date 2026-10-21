@@ -87,7 +87,7 @@ class RoleService:
                 raise Cancelled("Смена роли отменена.")
             if len(app.store.get("custom_masks", {})) >= 100:
                 raise ValueError("Сохранено 100 своих ролей. Можно вернуться к любой из них по имени.")
-            app.stop()
+            app.cancel_reply()
             revision = app.store.get("response_revision", 0)
         cancel = threading.Event()
         call_id = None

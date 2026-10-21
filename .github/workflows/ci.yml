@@ -15,6 +15,7 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
+      - run: python -m pip install -e ".[minecraft]"
       - run: python -m unittest discover -s tests -v
       - run: python tools/check.py
       - run: python -m compileall -q joker tools
