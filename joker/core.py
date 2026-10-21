@@ -234,7 +234,7 @@ class App:
                 + "\nVoice status:\n" + self.voice.status()["detail"]
                 + "\nGame status (data):\n" + json.dumps(self.minecraft.status(), ensure_ascii=False))
 
-    def reply(self, text, actor="owner", expected_revision=None, *, owner=None, request_id=None):
+    def reply(self, text, actor="owner", expected_revision=None, *, owner=None, request_id=None, cancel_event=None):
         if not isinstance(text, str) or not text.strip() or len(text) > 4000:
             raise ValueError("Сообщение должно содержать от 1 до 4000 символов.")
         if self.runtime.sleeping():
@@ -249,8 +249,10 @@ class App:
                 revision = self.store.get("response_revision", 0)
                 if expected_revision is not None and expected_revision != revision:
                     raise Cancelled("Запрос отменён до начала генерации.")
+                if cancel_event is not None and cancel_event.is_set():
+                    raise Cancelled("Голосовое обращение уже отменено.")
                 mask_id = self.active
-                cancel = threading.Event()
+                cancel = cancel_event if cancel_event is not None else threading.Event()
                 self.active_cancel = cancel
                 history = self.store.history(actor)
                 messages = [{"role": m["role"], "content": m["content"]} for m in history

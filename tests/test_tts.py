@@ -204,7 +204,8 @@ class SpeechTests(TTSFixture):
     def test_tts_mode_requires_no_stt_and_never_opens_audio_input(self):
         self.settings.tts_url, self.settings.tts_model, self.settings.voice_device = "http://localhost/tts", "fixture", "cable"
         self.settings.voice_input_device = "must-not-be-opened"
-        with patch("sounddevice.RawInputStream") as capture, patch("joker.voice.threading.Thread") as thread:
+        with patch("sounddevice.RawInputStream") as capture, patch("joker.voice.threading.Thread") as thread, \
+                patch.object(self.voice.routes, "preflight", return_value=None):
             self.voice.start(mode="tts")
         capture.assert_not_called()
         self.assertEqual(thread.call_args.kwargs["name"], "joker-tts")

@@ -10,6 +10,8 @@ from .telegram_bot import TelegramError
 from .roles import portrait_path
 from .memory import MemoryConflict
 from .errands import QueueConflict
+from .audio_routes import RouteConflict
+from .readiness import report as readiness_report
 
 
 class BoundedServer(ThreadingHTTPServer):
@@ -84,6 +86,11 @@ def make_server(app, port=None):
                 self.write_body(raw)
             elif self.path == "/api/status":
                 self.respond(app.status())
+            elif self.path in ("/api/audio/devices", "/api/readiness"):
+                try:
+                    self.respond(app.voice.routes.report() if self.path == "/api/audio/devices" else readiness_report(app))
+                except ModelError as exc:
+                    self.respond({"error": str(exc)}, 503)
             elif self.path.partition("?")[0] in ("/api/experience", "/api/experience/export"):
                 try:
                     route = urllib.parse.urlsplit(self.path)
@@ -203,6 +210,9 @@ def make_server(app, port=None):
                     else:
                         result = app.errands.control(value["id"], value["version"], value["action"])
                     self.respond({"reply": result["detail"], "errands": result})
+                elif self.path == "/api/audio/routes":
+                    routes = app.voice.routes.save(value["version"], value["output"], value["input"])
+                    self.respond({"reply": "Аудиоустройства сохранены. Голос включается отдельно.", "routes": routes})
                 elif self.path == "/api/voice":
                     action = value.get("action")
                     if action == "profile":
@@ -271,7 +281,7 @@ def make_server(app, port=None):
                     self.respond({"error": "Не найдено"}, 404)
             except Cancelled:
                 self.respond({"cancelled": True, "reply": "Предыдущий ответ отменён."})
-            except (MemoryConflict, QueueConflict) as exc:
+            except (MemoryConflict, QueueConflict, RouteConflict) as exc:
                 self.respond({"error": str(exc)}, 409)
             except ModelError as exc:
                 self.respond({"error": str(exc)}, 503)

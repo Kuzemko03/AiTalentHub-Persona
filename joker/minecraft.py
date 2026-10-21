@@ -298,7 +298,7 @@ class MinecraftService:
         self._callback_times[kind] = now
         self.app.experience.record("world:minecraft", "minecraft", kind, data)
 
-    def accept(self, message):
+    def accept(self, message, *, voice_ticket=None):
         """Only typed/parsed chat; never infer the sender from a raw chat string."""
         if self.entry is None or self.shutdown.is_set():
             return
@@ -308,29 +308,36 @@ class MinecraftService:
                 or sender.casefold() == self.settings.minecraft_bot.casefold()):
             return
         with self.app.guard:
+            if voice_ticket is not None and not self.app.voice.current(voice_ticket):
+                return
             aliases = ("джокер", self.settings.minecraft_bot, self.app.masks[self.app.active]["display_name"])
             revision = self.app.store.get("response_revision", 0)
         addressed = any(re.search(r"(?<!\w)" + re.escape(a) + r"(?!\w)", text, re.I) for a in aliases)
         owner = sender.casefold() == self.settings.minecraft_owner.casefold()
         content = self.strip_address(text)
-        if owner and content.casefold().rstrip(".!?") in STOP:
-            reply = self.app.stop()  # Priority path: no queue and no model request.
-            self.control_reply(reply)
-            return
-        if owner and content.casefold() in ("/проснись", "/wake"):
-            self.control_reply(self.app.runtime.wake())
-            return
-        if self.app.runtime.sleeping():
-            if addressed:
-                self.event("chat.ignored.sleep", {"actor": sender})
-            return
-        if not addressed:
-            return
-        try:
-            self.messages.put_nowait((sender, content, owner, revision, self.epoch, message.get("source", "chat")))
-            self.event("chat.queued", {"actor": sender, "source": message.get("source", "chat"), "text": content[:500]})
-        except queue.Full:
-            self.event("chat.dropped.queue_full", {"actor": sender})
+        with self.app.guard:
+            if (revision != self.app.store.get("response_revision", 0)
+                    or voice_ticket is not None and not self.app.voice.current(voice_ticket)):
+                return
+            if owner and content.casefold().rstrip(".!?") in STOP:
+                reply = self.app.stop()  # Priority path: no queue and no model request.
+                self.control_reply(reply)
+                return
+            if owner and content.casefold() in ("/проснись", "/wake"):
+                self.control_reply(self.app.runtime.wake())
+                return
+            if self.app.runtime.sleeping():
+                if addressed:
+                    self.event("chat.ignored.sleep", {"actor": sender})
+                return
+            if not addressed:
+                return
+            try:
+                self.messages.put_nowait((sender, content, owner, revision, self.epoch,
+                                         message.get("source", "chat"), voice_ticket))
+                self.event("chat.queued", {"actor": sender, "source": message.get("source", "chat"), "text": content[:500]})
+            except queue.Full:
+                self.event("chat.dropped.queue_full", {"actor": sender})
 
     def control_reply(self, reply):
         with self.app.guard, self.lock:
@@ -343,7 +350,7 @@ class MinecraftService:
     def work_once(self):
         try:
             started = time.monotonic()
-            sender, text, owner, revision, epoch, source = self.messages.get_nowait()
+            sender, text, owner, revision, epoch, source, voice_ticket = self.messages.get_nowait()
         except queue.Empty:
             return False
         token = text.partition(" ")[0].casefold()
@@ -352,13 +359,15 @@ class MinecraftService:
         try:
             with self.app.guard:
                 if (revision != self.app.store.get("response_revision", 0)
-                        or self.entry is None or epoch != self.epoch):
+                        or self.entry is None or epoch != self.epoch
+                        or voice_ticket is not None and not self.app.voice.current(voice_ticket)):
                     return True
-            if owner:
-                result = self.app.command(text, actor="minecraft:" + sender.casefold(), expected_revision=revision)
-                # Switching a mask legitimately changes the response revision.
-                revision = self.app.store.get("response_revision", 0)
-            else:
+                if owner:
+                    result = self.app.command(text, actor="minecraft:" + sender.casefold(), expected_revision=revision)
+                    if result is not None:
+                        voice_ticket = None  # A confirmed operator command may switch/stop this session itself.
+                    revision = self.app.store.get("response_revision", 0)
+            if not owner:
                 # Guests may converse, but cannot mutate the shared role or run tools.
                 from .roles import role_request
                 if token in CONTROL or role_request(text):
@@ -366,17 +375,21 @@ class MinecraftService:
                 result = None
             if result is None:
                 answer = self.app.reply(text, actor="minecraft:" + sender.casefold(),
-                                        expected_revision=revision, owner=owner)
+                                        expected_revision=revision, owner=owner,
+                                        cancel_event=voice_ticket.cancel if voice_ticket is not None else None)
                 result, revision = answer["reply"], answer["_revision"]
+                if answer.get("_transition"):
+                    voice_ticket = None
             reply = chat_text(result)
             if source == "voice":
                 self.app.voice.metrics["reply_ms"] = round((time.monotonic() - started) * 1000)
             with self.app.guard, self.lock:
                 if (reply and self.entry is not None and epoch == self.epoch and not self.shutdown.is_set()
-                        and revision == self.app.store.get("response_revision", 0)):
+                        and revision == self.app.store.get("response_revision", 0)
+                        and (voice_ticket is None or self.app.voice.current(voice_ticket))):
                     self.entry.ChatMessage(reply)
                     self.event("reply.submitted", {"actor": sender, "chars": len(reply), "source": source})
-                    self.app.voice.enqueue(reply, revision, epoch)
+                    self.app.voice.enqueue(reply, revision, epoch, ticket=voice_ticket)
             return True
         except (Cancelled, ModelError, ValueError):
             return True

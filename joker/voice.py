@@ -16,12 +16,40 @@ import urllib.parse
 import urllib.request
 import uuid
 import wave
+from typing import NamedTuple
 
 from .backends import Cancelled, ModelError
+from .audio_routes import AudioRoutes
 from .tts import MAX_TEXT, PiperTTS, installed, pcm_wav, speech_text
 
 RATE = 48000
 MAX_PCM = RATE * 2 * 10
+
+
+class VoiceTicket(NamedTuple):
+    revision: int
+    epoch: object
+    session: int
+    cancel: threading.Event
+
+
+class AudioJob(NamedTuple):
+    player: str
+    pcm: bytes
+    ticket: VoiceTicket
+    received: float
+
+
+class SpeechJob(NamedTuple):
+    text: str
+    voice: str
+    ticket: VoiceTicket
+    queued: float
+
+
+class CallJob(NamedTuple):
+    text: str
+    ticket: VoiceTicket
 
 
 def wav_bytes(pcm, rate=RATE):
@@ -79,13 +107,17 @@ class AudioHTTP:
         except (OSError, ValueError, urllib.error.URLError):
             raise ModelError("Аудиосервис не подтвердил запрос. Проверь настройки и соединение.") from None
 
-    def transcribe(self, pcm):
+    def transcribe(self, pcm, cancel=None):
+        if cancel is not None and cancel.is_set():
+            raise Cancelled("Распознавание отменено.")
         boundary = "joker" + uuid.uuid4().hex
         body = (f'--{boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n{self.settings.stt_model}\r\n'
                 f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="speech.wav"\r\n'
                 'Content-Type: audio/wav\r\n\r\n').encode() + wav_bytes(pcm) + f"\r\n--{boundary}--\r\n".encode()
         raw = self.request(self.settings.stt_url, self.settings.stt_key, body,
                            "multipart/form-data; boundary=" + boundary)
+        if cancel is not None and cancel.is_set():
+            raise Cancelled("Распознавание отменено.")
         try:
             value = json.loads(raw)
             if not isinstance(value, dict) or not isinstance(value.get("text"), str) or len(value["text"]) > 1000:
@@ -113,6 +145,7 @@ class Voice:
     def __init__(self, app, provider=None):
         self.app = app
         self.provider = provider or AudioHTTP(app.settings)
+        self.routes = AudioRoutes(app)
         self.enabled = False
         self.lock = threading.RLock()
         self.buffers = {}
@@ -131,6 +164,7 @@ class Voice:
         self.session = 0
         self.mode = app.store.get("voice_mode", app.settings.voice_mode)
         self.preview_lock = threading.Lock()
+        self.playback_lock = threading.Lock()
 
     def selected_voice(self):
         return self.voices.get(self.app.active, self.app.settings.tts_voice)
@@ -152,7 +186,7 @@ class Voice:
             return {"enabled": self.enabled, "detail": self.detail, "playing": self.playing,
                     "queued": self.speech.qsize(), "metrics": dict(self.metrics),
                     "role_voices": dict(self.voices), "mode": self.mode, "tts": self.tts_status(),
-                    "output_device_configured": bool(self.app.settings.voice_device),
+                    "output_device_configured": self.routes.configured("output"),
                     "stt_configured": bool(self.app.settings.stt_url and self.app.settings.stt_model)}
 
     def valid(self, revision, epoch):
@@ -160,27 +194,41 @@ class Voice:
                 and revision == self.app.store.get("response_revision", 0)
                 and (epoch is None or epoch == self.app.minecraft.epoch and self.app.minecraft.entry is not None))
 
-    def feed(self, player, pcm, source="game"):
+    def ticket(self, revision, epoch):
+        return VoiceTicket(revision, epoch, self.session, self.cancel)
+
+    def current(self, ticket):
+        with self.lock:
+            return (ticket.session == self.session and ticket.cancel is self.cancel
+                    and not ticket.cancel.is_set() and self.valid(ticket.revision, ticket.epoch))
+
+    def worker_current(self, expected_session):
+        return expected_session is None or expected_session == self.session
+
+    def feed(self, player, pcm, source="game", *, expected_session=None):
         if (self.mode == "tts" or not self.enabled or self.shutdown.is_set() or self.playing or self.app.runtime.sleeping()
                 or not re.fullmatch(r"[A-Za-z0-9_]{3,16}", player)
                 or player.casefold() == self.app.settings.minecraft_bot.casefold()
                 or source != "call" and not self.app.settings.voice_guests and player.casefold() != self.app.settings.minecraft_owner.casefold()
-                or not 0 < len(pcm) <= 19200 or len(pcm) % 2):
+                or source not in ("game", "call") or not 0 < len(pcm) <= 19200 or len(pcm) % 2):
             return
         now = time.monotonic()
         samples = struct.unpack("<" + "h" * (len(pcm) // 2), pcm)
         rms = math.sqrt(sum(x * x for x in samples) / len(samples))
         with self.lock:
-            buf = self.buffers.get(player)
+            if not self.worker_current(expected_session) or not self.enabled or self.mode == "tts" or self.shutdown.is_set():
+                return
+            key = (source, player)
+            buf = self.buffers.get(key)
             if rms < 250:
                 return  # Silence is finalized by flush, not sent to a paid service.
             if buf is None:
                 if len(self.buffers) >= 4:
                     return
                 buf = {"pcm": bytearray(), "at": now, "last": now,
-                       "revision": self.app.store.get("response_revision", 0),
-                       "epoch": None if source == "call" else self.app.minecraft.epoch}
-                self.buffers[player] = buf
+                       "ticket": self.ticket(self.app.store.get("response_revision", 0),
+                                             None if source == "call" else self.app.minecraft.epoch)}
+                self.buffers[key] = buf
             if len(buf["pcm"]) + len(pcm) > MAX_PCM:
                 # Drop an overlong utterance as a whole instead of executing a truncated command.
                 buf["overflow"] = True
@@ -191,27 +239,30 @@ class Voice:
     def flush(self, now=None):
         now = time.monotonic() if now is None else now
         with self.lock:
-            for player, buf in list(self.buffers.items()):
+            for key, buf in list(self.buffers.items()):
                 if now - buf["last"] < .65:
                     continue
-                del self.buffers[player]
-                if buf.get("overflow") or len(buf["pcm"]) < RATE * 2 * .3:
+                del self.buffers[key]
+                if not self.current(buf["ticket"]) or buf.get("overflow") or len(buf["pcm"]) < RATE * 2 * .3:
                     continue
                 try:
-                    self.audio.put_nowait((player, bytes(buf["pcm"]), buf["revision"], buf["epoch"], buf["at"]))
+                    self.audio.put_nowait(AudioJob(key[1], bytes(buf["pcm"]), buf["ticket"], buf["at"]))
                 except queue.Full:
                     pass
 
-    def listen_once(self):
-        if self.mode == "tts":
+    def listen_once(self, expected_session=None):
+        if self.mode == "tts" or not self.worker_current(expected_session):
             return False
         self.flush()
-        try:
-            player, pcm, revision, epoch, received = self.audio.get_nowait()
-        except queue.Empty:
-            return False
+        with self.lock:
+            if not self.worker_current(expected_session):
+                return False
+            try:
+                player, pcm, ticket, received = self.audio.get_nowait()
+            except queue.Empty:
+                return False
         with self.app.guard:
-            if not self.valid(revision, epoch):
+            if not self.current(ticket):
                 return True
             # Both a bounded intake and a daily quota, separate from text-model quota.
             day = self.app.store.now()[:10]
@@ -224,80 +275,110 @@ class Voice:
             self.app.store.set("voice_budget", quota)
             self.last_stt = time.monotonic()
         started = time.monotonic()
-        session = self.session
-        text = self.provider.transcribe(pcm)
+        try:
+            text = self.provider.transcribe(pcm, ticket.cancel)
+        except ModelError:
+            if not self.current(ticket):
+                return True
+            raise
         with self.app.guard:
-            if session == self.session and self.valid(revision, epoch) and text:
-                self.metrics = {"intake_to_stt_ms": round((started - received) * 1000),
-                                "stt_ms": round((time.monotonic() - started) * 1000)}
-                if epoch is None:
+            if self.current(ticket) and text:
+                self.metrics.update(intake_to_stt_ms=round((started - received) * 1000),
+                                    stt_ms=round((time.monotonic() - started) * 1000))
+                if ticket.epoch is None:
                     aliases = ("Джокер", self.app.masks[self.app.active]["display_name"])
                     if any(re.search(r"(?<!\w)" + re.escape(a) + r"(?!\w)", text, re.I) for a in aliases):
-                        try: self.calls.put_nowait((text, revision, self.session))
+                        try: self.calls.put_nowait(CallJob(text, ticket))
                         except queue.Full: pass
                 else:
                     self.app.minecraft.accept({"user": player, "msg": text,
-                        "parse_type": "parsed", "source": "voice"})
+                        "parse_type": "parsed", "source": "voice"}, voice_ticket=ticket)
         return True
 
-    def call_once(self):
-        if self.mode == "tts":
+    def call_once(self, expected_session=None):
+        if self.mode == "tts" or not self.worker_current(expected_session):
             return False
-        try:
-            text, revision, session = self.calls.get_nowait()
-        except queue.Empty:
-            return False
-        if session != self.session or not self.valid(revision, None):
+        with self.lock:
+            if not self.worker_current(expected_session):
+                return False
+            try:
+                text, ticket = self.calls.get_nowait()
+            except queue.Empty:
+                return False
+        if not self.current(ticket):
             return True
         # An audio cable has no reliable individual speaker ID. It never has owner/tool rights.
         started = time.monotonic()
-        result = self.app.reply(text, actor="call:shared", expected_revision=revision, owner=False)
-        if session == self.session and self.valid(revision, None):
+        result = self.app.reply(text, actor="call:shared", expected_revision=ticket.revision,
+                                owner=False, cancel_event=ticket.cancel)
+        if self.current(ticket):
             self.metrics["reply_ms"] = round((time.monotonic() - started) * 1000)
-            self.enqueue(result["reply"], revision, None)
+            self.enqueue(result["reply"], ticket.revision, None, ticket=ticket)
         return True
 
-    def enqueue(self, text, revision, epoch):
-        if not self.valid(revision, epoch):
-            return
-        text = speech_text(text)
-        if not text or len(text) > MAX_TEXT:
-            self.detail = "Реплика не озвучена: нужен текст до 1000 символов. Полный ответ доступен в чате."
-            return
-        voice = self.selected_voice()
-        try:
-            self.speech.put_nowait((text, voice, revision, epoch, time.monotonic()))
-        except queue.Full:
-            self.detail = "Очередь голоса заполнена. Текст остаётся в игровом чате."
+    def enqueue(self, text, revision, epoch, *, ticket=None):
+        with self.lock:
+            ticket = ticket or self.ticket(revision, epoch)
+            if not self.current(ticket):
+                return
+            text = speech_text(text)
+            if not text or len(text) > MAX_TEXT:
+                self.detail = "Реплика не озвучена: нужен текст до 1000 символов. Полный ответ доступен в чате."
+                return
+            voice = self.selected_voice()
+            try:
+                self.speech.put_nowait(SpeechJob(text, voice, ticket, time.monotonic()))
+            except queue.Full:
+                self.detail = "Очередь голоса заполнена. Текст остаётся в игровом чате."
 
-    def speak_once(self):
-        try:
-            text, voice, revision, epoch, queued = self.speech.get_nowait()
-        except queue.Empty:
+    def speak_once(self, expected_session=None):
+        if not self.worker_current(expected_session):
             return False
-        if not self.valid(revision, epoch):
+        with self.lock:
+            if not self.worker_current(expected_session):
+                return False
+            try:
+                text, voice, ticket, queued = self.speech.get_nowait()
+            except queue.Empty:
+                return False
+        if not self.current(ticket):
             return True
-        session = self.session
-        cancel = self.cancel
+        cancel = ticket.cancel
         try:
             pcm, rate, channels = self.render(text, voice, cancel)
         except Cancelled:
             return True
-        if cancel.is_set() or session != self.session or not self.valid(revision, epoch):
+        except ModelError:
+            if not self.current(ticket):
+                return True
+            raise
+        if not self.current(ticket):
+            return True
+        while not self.playback_lock.acquire(timeout=.05):
+            if not self.current(ticket):
+                return True
+        try:
+            return self.play(pcm, rate, channels, ticket, queued)
+        finally:
+            self.playback_lock.release()
+
+    def play(self, pcm, rate, channels, ticket, queued):
+        if not self.current(ticket):
             return True
         import sounddevice
-        device = self.app.settings.voice_device
-        if device.isdecimal():
-            device = int(device)
-        with sounddevice.RawOutputStream(samplerate=rate, channels=channels, dtype="int16", device=device) as output:
+        args = self.routes.stream_args("output", rate, channels)
+        if not self.current(ticket):
+            return True
+        with sounddevice.RawOutputStream(**args) as output:
             self.playing = True
             try:
                 chunk = max(2 * channels, rate // 50 * 2 * channels)
                 for offset in range(0, len(pcm), chunk):
-                    if session != self.session or cancel.is_set() or not self.valid(revision, epoch):
+                    if not self.current(ticket):
                         output.abort()
                         break
-                    output.write(pcm[offset:offset + chunk])
+                    if output.write(pcm[offset:offset + chunk]):
+                        self.metrics["output_underflows"] = self.metrics.get("output_underflows", 0) + 1
                     if offset == 0:
                         self.metrics.update(text_to_sound_ms=round((time.monotonic() - queued) * 1000))
             finally:
@@ -310,6 +391,8 @@ class Voice:
         if cancel.is_set():
             raise Cancelled("Синтез отменён.")
         with self.app.guard:
+            if cancel.is_set():
+                raise Cancelled("Синтез отменён до резервирования бюджета.")
             day = self.app.store.now()[:10]
             budget = self.app.store.get("tts_budget", {"day": day, "used": 0})
             if budget["day"] != day:
@@ -361,9 +444,9 @@ class Voice:
             self.app.store.set("role_voices", self.voices)
 
     def cancel_pending(self):
-        self.cancel.set()
-        self.cancel = threading.Event()
         with self.lock:
+            self.cancel.set()
+            self.cancel = threading.Event()
             self.buffers.clear()
             for pending in (self.audio, self.speech, self.calls):
                 while True:
@@ -385,6 +468,10 @@ class Voice:
         return self.detail
 
     def start(self, mode=None):
+        with self.app.guard:
+            return self._start(mode)
+
+    def _start(self, mode=None):
         mode = mode or self.mode
         if mode not in ("tts", "conversation"):
             raise ValueError("Режим голоса: tts или conversation.")
@@ -393,35 +480,36 @@ class Voice:
                 raise ValueError("Сначала выключи голос, затем выбери другой режим.")
             return
         s = self.app.settings
-        if not self.tts_status()["ready"] or not s.voice_device:
-            raise ValueError("Настрой TTS, выбранный голос и VOICE_OUTPUT_DEVICE. Пример можно создать без аудиоустройства.")
+        if not self.tts_status()["ready"] or not self.routes.configured("output"):
+            raise ModelError("Настрой TTS, выбранный голос и выход звука в панели. Пример можно создать без аудиоустройства.")
         if mode == "conversation" and not all((s.stt_url, s.stt_model)):
             raise ValueError("Для разговора настрой STT_URL/MODEL; для одной озвучки выбери режим tts.")
         import importlib.util
         if importlib.util.find_spec("sounddevice") is None:
             raise ValueError('Установи голос: pip install -e ".[voice]"')
-        self.shutdown.clear()
-        self.mode = mode
+        input_args = self.routes.preflight(mode)
+        with self.lock:
+            self.shutdown.clear()
+            self.mode = mode
+            self.session += 1
+            self.enabled = True
         self.app.store.set("voice_mode", mode)
-        self.session += 1
-        self.enabled = True
         self.detail = ("Озвучка включена; микрофон и STT не используются." if mode == "tts" else
                        "Голос включён. Обращайся по имени; вывод на выбранное аудиоустройство.")
-        if mode == "conversation" and s.voice_input_device:
+        if input_args is not None:
             import sounddevice
-            device = int(s.voice_input_device) if s.voice_input_device.isdecimal() else s.voice_input_device
             session = self.session
             def incoming(data, frames, timing, status):
                 if session != self.session:
                     return
                 if status:
                     with self.lock:
-                        self.buffers.pop("CallGuest", None)
+                        if session == self.session:
+                            self.buffers.pop(("call", "CallGuest"), None)
                     return
-                self.feed("CallGuest", bytes(data), source="call")
+                self.feed("CallGuest", bytes(data), source="call", expected_session=session)
             try:
-                self.input_stream = sounddevice.RawInputStream(device=device, samplerate=RATE,
-                    channels=1, dtype="int16", blocksize=960, callback=incoming)
+                self.input_stream = sounddevice.RawInputStream(**input_args, blocksize=960, callback=incoming)
                 self.input_stream.start()
             except Exception:
                 self.close()
@@ -437,25 +525,43 @@ class Voice:
     def run(self, step, session):
         while session == self.session and not self.shutdown.is_set():
             try:
-                step()
+                step(expected_session=session)
             except Cancelled:
                 pass
+            except ModelError as exc:
+                with self.lock:
+                    if session == self.session and not self.shutdown.is_set():
+                        self.detail = str(exc)
             except Exception:
-                self.detail = "Ошибка аудио. Проверь сервис и устройство; текстовый чат доступен."
+                with self.lock:
+                    if session == self.session and not self.shutdown.is_set():
+                        self.detail = "Ошибка аудио. Проверь сервис и устройство; текстовый чат доступен."
             self.shutdown.wait(.1)
 
     def close(self):
-        self.session += 1
-        self.enabled = False
-        self.shutdown.set()
-        self.cancel_pending()
+        with self.app.guard:
+            self._close()
+
+    def _close(self):
+        with self.lock:
+            self.session += 1
+            self.enabled = False
+            self.shutdown.set()
+            self.cancel_pending()
         close_provider = getattr(self.provider, "close", None)
+        cleanup_failed = False
         if callable(close_provider):
-            close_provider()
-        if self.input_stream:
             try:
-                self.input_stream.abort()
-                self.input_stream.close()
-            finally:
-                self.input_stream = None
-        self.detail = "Голос выключен."
+                close_provider()
+            except Exception:
+                cleanup_failed = True
+        stream, self.input_stream = self.input_stream, None
+        if stream is not None:
+            # Even a disconnected device can reject abort; still release its native handle.
+            for operation in (stream.abort, stream.close):
+                try:
+                    operation()
+                except Exception:
+                    cleanup_failed = True
+        self.detail = ("Голос выключен. Драйвер или TTS-процесс не подтвердил полное закрытие; проверь устройство."
+                       if cleanup_failed else "Голос выключен.")

@@ -49,7 +49,7 @@ class VoiceTests(Fixture):
 
     def test_oversized_utterance_is_dropped_whole(self):
         for _ in range(102): self.voice.feed("AlexPlayer", struct.pack("<h", 1200) * 4800)
-        self.assertLessEqual(len(self.voice.buffers["AlexPlayer"]["pcm"]), 960000)
+        self.assertLessEqual(len(self.voice.buffers[("game", "AlexPlayer")]["pcm"]), 960000)
         self.voice.flush(time.monotonic() + 1)
         self.voice.listen_once()
         self.voice.provider.transcribe.assert_not_called()
@@ -115,7 +115,8 @@ class VoiceTests(Fixture):
         output.write.side_effect = lambda chunk: self.app.stop()
         context = MagicMock()
         context.__enter__.return_value = output
-        with patch("sounddevice.RawOutputStream", return_value=context) as stream:
+        with patch("sounddevice.RawOutputStream", return_value=context) as stream, \
+                patch.object(self.voice.routes, "stream_args", return_value={"device": 42}):
             self.voice.speak_once()
         self.assertEqual(stream.call_args.kwargs["device"], 42)
         self.assertEqual(output.write.call_count, 1)
@@ -135,7 +136,10 @@ class VoiceTests(Fixture):
         self.settings.stt_url, self.settings.tts_url = "http://localhost/stt", "http://localhost/tts"
         self.settings.stt_model, self.settings.tts_model = "test", "test"
         self.settings.tts_voice, self.settings.voice_device = "test", "output-cable"
-        with patch("sounddevice.RawInputStream") as capture, patch("joker.voice.threading.Thread"):
+        def preflight(mode):
+            return dict(device="input-cable", samplerate=48000, channels=1, dtype="int16") if self.settings.voice_input_device else None
+        with patch("sounddevice.RawInputStream") as capture, patch("joker.voice.threading.Thread"), \
+                patch.object(self.voice.routes, "preflight", side_effect=preflight):
             self.voice.start()
             capture.assert_not_called()
             self.voice.close()
