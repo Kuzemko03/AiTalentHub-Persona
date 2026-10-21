@@ -1,4 +1,6 @@
 """Opt-in UnionClef adapter. Game callbacks never call a model on the Java thread."""
+import json
+import math
 import queue
 import re
 import socket
@@ -6,17 +8,14 @@ import threading
 import time
 
 from .backends import Cancelled, ModelError
-from .game_tasks import advance, TERMINAL, owner_distance
+from .game_tasks import advance, owner_distance, inventory
 
 NICK = re.compile(r"[A-Za-z0-9_]{3,16}\Z")
-STOP = {"стоп", "хватит", "отмена", "/stop", "/стоп", "подожди здесь", "жди здесь"}
+STOP = {"стоп", "/stop", "/стоп"}
 CONTROL = {"/mask", "/маска", "/reset", "/сброс", "/roles", "/роли", "/status", "/статус",
            "/сон", "/sleep", "/проснись", "/wake", "/заметка", "/note", "/заметки", "/notes",
            "/найди", "/find", "/забудь", "/forget", "/связь", "/link"}
-ITEMS = {"дуб": "oak_log", "дуба": "oak_log", "дубовых брёвен": "oak_log",
-         "дубовых бревен": "oak_log", "oak_log": "oak_log", "брёвна": "oak_log",
-         "бревна": "oak_log", "булыжник": "cobblestone", "булыжника": "cobblestone",
-         "cobblestone": "cobblestone", "землю": "dirt", "земли": "dirt", "dirt": "dirt"}
+
 
 
 def probe(settings):
@@ -54,6 +53,16 @@ class MinecraftService:
         self.thread = None
         self.worker_thread = None
         self.next_join = 0
+        self._last_task_event = None
+        self._callback_times = {}
+        self.resources = json.loads((app.home.parent / "shared" / "minecraft-items.json").read_text(encoding="utf-8"))
+        if (not isinstance(self.resources, dict) or not self.resources or len(self.resources) > 128
+                or any(not re.fullmatch(r"[a-z0-9_]{1,80}", k) or not isinstance(v, str)
+                       or not 1 <= len(v) <= 200 for k, v in self.resources.items())):
+            raise ValueError("Неверный каталог игровых ресурсов.")
+        if app.store.get("pending_game_action"):
+            self.task = {"kind": "restored", "state": "unconfirmed",
+                         "detail": "После перезапуска проверь игру и останови прежнюю задачу."}
 
     def status(self):
         with self.lock:
@@ -150,6 +159,7 @@ class MinecraftService:
                 elif self.task["state"] == "running":
                     # Idle does not establish that the requested resources were collected.
                     self.task["state"] = "idle_unverified"
+            self.trace_task()
 
     def stop_task(self):
         with self.app.guard, self.lock:
@@ -171,6 +181,7 @@ class MinecraftService:
                     with self.lock:
                         self.busy = False
                         self.task = None
+                        self.trace_task()
                     return "UnionClef подтвердил: активной игровой задачи нет."
                 self.shutdown.wait(.1)
             return "Остановка передана в UnionClef; завершение задачи ещё не подтверждено."
@@ -185,52 +196,86 @@ class MinecraftService:
         return text.strip()
 
     def command(self, text):
+        # Explicit operator controls only. Ordinary language belongs to the model.
         text = self.strip_address(text).casefold().rstrip(".!?")
-        if text in ("/игра", "/minecraft", "что ты делаешь", "что сейчас делаешь"):
+        if text in ("/игра", "/minecraft"):
             state = self.status()
             return "Minecraft: " + state["detail"] + ". Задача: " + str(state["task"] or "нет")
         if text in STOP:
             return self.app.stop()
-        follow = text in ("за мной", "иди за мной", "следуй за мной")
-        come = text in ("ко мне", "подойди ко мне", "иди ко мне")
-        collect = re.fullmatch(r"(?:принеси|добудь|собери)\s+(.+)", text)
-        if not follow and not come and not collect:
-            return None
+        return None
+
+    def observe(self):
+        result = self.status()
         if self.entry is None:
-            return "Minecraft не подключён. Поручение в игру не отправлено."
-        if self.task and self.task.get("state") not in TERMINAL:
-            return "Сначала скажи «стоп», затем дай новое игровое поручение."
-        count, item = 0, ""
-        if collect:
-            request = re.fullmatch(r"(\d+|два стака|стак)\s+(.+)", collect[1])
-            if not request or request[2] not in ITEMS:
-                return "Укажи ресурс и количество: например, «принеси 16 дубовых брёвен» или «принеси два стака дубовых брёвен». Сейчас доступны дуб, булыжник и земля."
-            count = {"два стака": 128, "стак": 64}.get(request[1], 0)
-            if not count:
-                count = int(request[1])
-            if not 1 <= count <= 256:
-                return "Для одной задачи выбери от 1 до 256 предметов."
-            item = ITEMS[request[2]]
+            return result
         try:
-            if not self.entry.inGame():
-                return "Мир Minecraft закрыт. Поручение не отправлено."
-            if self.entry.hasActiveTask():
-                return "В Minecraft уже есть активная задача. Сначала скажи «стоп», затем дай новое поручение."
-            if follow or come:
-                self.entry.ChatMessage(";followPlayer " + self.settings.minecraft_owner)
-                task = {"kind": "come" if come else "follow", "target": self.settings.minecraft_owner, "state": "submitted"}
-            else:
-                self.entry.ExecuteCommand(f"@get {item} {count}")
-                task = {"kind": "deliver" if text.startswith("принеси") else "collect", "item": item,
-                        "count": count, "target": self.settings.minecraft_owner,
-                        "state": "submitted", "phase": "collect", "started_at": time.monotonic()}
-            with self.lock:
-                self.task = task
-            return "Поручение передано в UnionClef. Результат ещё не подтверждён."
+            result["inventory"] = inventory(self.entry)
+            players = []
+            for raw in self.entry.getPlayersInfo(64):
+                name = str(raw.get("name", ""))
+                distance = float(raw.get("distance", "nan"))
+                if NICK.fullmatch(name) and math.isfinite(distance) and distance >= 0:
+                    players.append({"name": name, "distance": round(distance, 2)})
+            result["nearby_players"] = players[:64]
         except Exception:
-            with self.lock:
+            result["observation_error"] = "Не все игровые сведения доступны."
+        return result
+
+    def trace_task(self):
+        task = {k: v for k, v in (self.task or {}).items() if k != "started_at"}
+        if task != self._last_task_event:
+            self._last_task_event = dict(task)
+            self.app.experience.record("world:minecraft", "minecraft", "task.observed", task)
+        if (not task or task.get("state") in ("collected", "arrived")) and not self.busy:
+            self.app.store.set("pending_game_action", None)
+
+    def execute(self, action, item=None, count=None):
+        """Typed bridge operation. No user text, aliases or behavior selection."""
+        if action not in ("follow", "come", "collect", "deliver"):
+            raise ValueError("Неизвестный игровой инструмент.")
+        if action in ("collect", "deliver") and (not isinstance(item, str) or item not in self.resources
+                or type(count) is not int or not 1 <= count <= 256):
+            raise ValueError("Нужен ресурс из каталога и количество от 1 до 256.")
+        with self.app.guard, self.lock:
+            if self.entry is None:
+                return {"accepted": False, "completed": False, "detail": "Minecraft не подключён. Поручение не отправлено."}
+            if self.task and self.task.get("state") not in ("collected", "arrived"):
+                return {"accepted": False, "completed": False,
+                        "detail": "Сначала проверь прежнее поручение и нажми «стоп».", "task": dict(self.task)}
+            try:
+                if not self.entry.inGame() or self.entry.hasActiveTask():
+                    return {"accepted": False, "completed": False,
+                            "detail": "Мир закрыт или есть активная задача. Проверь игру и нажми «стоп»; новое поручение не отправлено."}
+                task = {"kind": action, "target": self.settings.minecraft_owner, "state": "submitted"}
+                if action in ("collect", "deliver"):
+                    task.update(item=item, count=count, phase="collect", started_at=time.monotonic())
+                # Write intent before any bridge side effect; never replay it after restart.
+                self.app.store.set("pending_game_action", {k: v for k, v in task.items() if k != "started_at"})
+                self.task = task
+                if action in ("follow", "come"):
+                    self.entry.ChatMessage(";followPlayer " + self.settings.minecraft_owner)
+                else:
+                    self.entry.ExecuteCommand(f"@get {item} {count}")
+                self.trace_task()
+                return {"accepted": True, "completed": False, "task": dict(task),
+                        "detail": "Поручение передано в UnionClef. Результат ещё не подтверждён."}
+            except Exception:
                 self.task = {"kind": "unknown", "state": "unconfirmed"}
-            return "Связь с UnionClef потеряна. Неизвестно, принята ли задача; проверь игру и нажми «стоп»."
+                self.trace_task()
+                return {"accepted": None, "completed": False, "task": dict(self.task),
+                        "detail": "Связь потеряна; приём задачи неизвестен. Проверь игру и останови задачу."}
+
+    def event(self, kind, data):
+        if self.entry is None or self.shutdown.is_set():
+            return
+        # Bound noisy callbacks, without choosing a character's reaction.
+        now = time.monotonic()
+        previous = self._callback_times.get(kind, 0)
+        if now - previous < 1:
+            return
+        self._callback_times[kind] = now
+        self.app.experience.record("world:minecraft", "minecraft", kind, data)
 
     def accept(self, message):
         """Only typed/parsed chat; never infer the sender from a raw chat string."""
@@ -255,13 +300,16 @@ class MinecraftService:
             self.control_reply(self.app.runtime.wake())
             return
         if self.app.runtime.sleeping():
+            if addressed:
+                self.event("chat.ignored.sleep", {"actor": sender})
             return
         if not addressed:
             return
         try:
             self.messages.put_nowait((sender, content, owner, revision, self.epoch, message.get("source", "chat")))
+            self.event("chat.queued", {"actor": sender, "source": message.get("source", "chat"), "text": content[:500]})
         except queue.Full:
-            pass
+            self.event("chat.dropped.queue_full", {"actor": sender})
 
     def control_reply(self, reply):
         with self.app.guard, self.lock:
@@ -296,7 +344,9 @@ class MinecraftService:
                     return True
                 result = None
             if result is None:
-                result = self.app.reply(text, actor="minecraft:" + sender.casefold(), expected_revision=revision)["reply"]
+                answer = self.app.reply(text, actor="minecraft:" + sender.casefold(),
+                                        expected_revision=revision, owner=owner)
+                result, revision = answer["reply"], answer["_revision"]
             reply = chat_text(result)
             if source == "voice":
                 self.app.voice.metrics["reply_ms"] = round((time.monotonic() - started) * 1000)
@@ -304,6 +354,7 @@ class MinecraftService:
                 if (reply and self.entry is not None and epoch == self.epoch and not self.shutdown.is_set()
                         and revision == self.app.store.get("response_revision", 0)):
                     self.entry.ChatMessage(reply)
+                    self.event("reply.submitted", {"actor": sender, "chars": len(reply), "source": source})
                     if source == "voice":
                         self.app.voice.enqueue(reply, revision, epoch)
             return True
@@ -385,11 +436,13 @@ class GameCallbacks:
 
     def onChatMessage(self, text): return text
     def onUpdateServerInfo(self, info): return info
-    def onDeath(self, killer): pass
-    def onKill(self, killed): pass
-    def onAutoclefEvent(self, kind, description): pass
-    def onDamage(self, amount): pass
-    def onDamageConfirmed(self, damaged, attacker, amount): pass
+    def onDeath(self, killer): self.service.event("death", {"killer": str(killer)[:120]})
+    def onKill(self, killed): self.service.event("kill", {"target": str(killed)[:120]})
+    def onAutoclefEvent(self, kind, description):
+        self.service.event("autoclef", {"kind": str(kind)[:80], "description": str(description)[:500]})
+    def onDamage(self, amount): self.service.event("damage", {"amount": str(amount)[:32]})
+    def onDamageConfirmed(self, damaged, attacker, amount):
+        self.service.event("damage.confirmed", {"target": str(damaged)[:120], "attacker": str(attacker)[:120], "amount": str(amount)[:32]})
     def onCaptchaSolveRequest(self, image): pass
     def onVoiceFeed(self, player, audio):
         self.service.app.voice.feed(str(player), bytes(audio))

@@ -83,6 +83,25 @@ def make_server(app, port=None):
                 self.write_body(raw)
             elif self.path == "/api/status":
                 self.respond(app.status())
+            elif self.path.partition("?")[0] in ("/api/experience", "/api/experience/export"):
+                try:
+                    route = urllib.parse.urlsplit(self.path)
+                    query = urllib.parse.parse_qs(route.query, max_num_fields=1)
+                    scope = query.get("scope", ["minecraft"])[0]
+                    actor = app.memory.scope(scope)
+                    report = {"scope": scope, "at": app.store.now(), "state": app.experience.state(actor),
+                              "events": app.experience.recent(actor, 100 if route.path.endswith("export") else 30)}
+                    if not route.path.endswith("export"):
+                        return self.respond(report)
+                    raw = json.dumps(report, ensure_ascii=False, indent=2).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Disposition", 'attachment; filename="joker-report-' + scope + '.json"')
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.write_body(raw)
+                except ValueError:
+                    self.respond({"error": "Неверная область журнала."}, 400)
             elif self.path.partition("?")[0] in ("/api/memory", "/api/memory/export"):
                 try:
                     route = urllib.parse.urlsplit(self.path)
@@ -154,11 +173,15 @@ def make_server(app, port=None):
                 elif self.path == "/api/stop":
                     self.respond({"reply": app.stop()})
                 elif self.path == "/api/game":
-                    actions = {"follow": "за мной", "oak": "принеси 16 дубовых брёвен", "stop": "стоп"}
+                    actions = {"follow": ("follow", {}), "oak": ("deliver", {"item": "oak_log", "count": 16})}
                     action = value.get("action")
+                    if action == "stop":
+                        return self.respond({"reply": app.stop()})
                     if not isinstance(action, str) or action not in actions:
                         raise ValueError("Неизвестное игровое действие.")
-                    self.respond(app.handle(actions[action]))
+                    tool, arguments = actions[action]
+                    observation = app.minecraft.execute(tool, **arguments)
+                    self.respond({"reply": observation["detail"], "observation": observation})
                 elif self.path == "/api/runtime":
                     actions = {"sleep": "/сон", "wake": "/проснись", "on": "/автономность вкл",
                                "off": "/автономность выкл"}

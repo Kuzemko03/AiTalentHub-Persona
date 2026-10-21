@@ -215,7 +215,7 @@ class Voice:
             return True
         # An audio cable has no reliable individual speaker ID. It never has owner/tool rights.
         started = time.monotonic()
-        result = self.app.reply(text, actor="call:shared", expected_revision=revision)
+        result = self.app.reply(text, actor="call:shared", expected_revision=revision, owner=False)
         if session == self.session and self.valid(revision, None):
             self.metrics["reply_ms"] = round((time.monotonic() - started) * 1000)
             self.enqueue(result["reply"], revision, None)

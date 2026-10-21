@@ -98,7 +98,7 @@ class MemoryTests(Fixture):
 
     def test_mutation_cancels_old_reply_and_preserves_game_task(self):
         note = self.note()
-        self.app.handle("За мной")
+        self.app.minecraft.execute("follow")
         original = self.model.generate
         def edited(*args, **kwargs):
             result = original(*args, **kwargs)

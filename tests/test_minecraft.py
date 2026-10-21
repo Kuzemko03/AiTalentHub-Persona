@@ -70,8 +70,8 @@ class MinecraftTests(unittest.TestCase):
 
     def test_offline_command_is_not_reported_as_executed(self):
         self.game.detach()
-        result = self.app.handle("Джокер, за мной")
-        self.assertIn("не отправлено", result["reply"])
+        result = self.app.minecraft.execute("follow")
+        self.assertIn("не отправлено", result["detail"])
         self.assertEqual(self.model.calls, 0)
 
     def test_validates_the_real_client_nickname_and_world(self):
@@ -83,25 +83,26 @@ class MinecraftTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.game.attach(other)
 
     def test_follow_uses_configured_owner_not_injected_arguments(self):
-        self.assertIn("передано", self.app.handle("Джокер, за мной")["reply"])
+        self.assertIn("передано", self.app.minecraft.execute("follow")["detail"])
         self.assertEqual(self.entry.chats, [";followPlayer AlexPlayer"])
         self.assertEqual(self.game.task["state"], "submitted")
 
     def test_collection_uses_allowlisted_item_and_bounded_amount(self):
-        self.app.handle("Принеси два стака дубовых брёвен")
+        self.app.minecraft.execute("deliver", item="oak_log", count=128)
         self.assertEqual(self.entry.commands, ["@get oak_log 128"])
         self.assertEqual(self.game.task["state"], "submitted")
-        self.assertIn("стоп", self.app.handle("Принеси 16 земли")["reply"])
+        self.assertIn("стоп", self.app.minecraft.execute("deliver", item="dirt", count=16)["detail"])
         self.assertEqual(len(self.entry.commands), 1)
 
-    def test_ambiguous_and_invalid_resource_requests_do_not_run_commands(self):
-        for text in ("принеси дерево", "принеси 0 дуба", "принеси 257 дуба", "принеси 5 /op", "добудь -1 земли"):
-            with self.subTest(text=text): self.app.handle(text)
+    def test_invalid_typed_resource_requests_do_not_run_commands(self):
+        for item, count in (("oak_log", 0), ("oak_log", 257), ("/op", 5), ("dirt", -1), ("dirt", True)):
+            with self.subTest(item=item,count=count), self.assertRaises(ValueError):
+                self.game.execute("collect", item=item, count=count)
         self.assertEqual(self.entry.commands, [])
         self.assertEqual(self.model.calls, 0)
 
     def test_idle_is_not_proof_of_collected_resources(self):
-        self.app.handle("Принеси 16 дуба")
+        self.app.minecraft.execute("deliver", item="oak_log", count=16)
         self.game.refresh()
         self.assertEqual(self.game.task["state"], "submitted")
         self.entry.active = True
@@ -133,20 +134,20 @@ class MinecraftTests(unittest.TestCase):
         self.assertNotIn("private details", result)
 
     def test_switching_predefined_mask_preserves_game_task(self):
-        self.app.handle("За мной")
+        self.app.minecraft.execute("follow")
         task = dict(self.game.task)
-        self.app.handle("Джокер, будь ИИ-инженером")
+        self.app.handle("/mask engineer")
         self.assertEqual(self.app.active, "engineer")
         self.assertEqual(self.game.task, task)
         self.assertEqual(self.entry.stop_calls, 0)
 
     def test_new_role_generation_does_not_stop_game_task(self):
-        self.app.handle("За мной")
+        self.app.minecraft.execute("follow")
         profile = {"display_name": "Анна", "role": "Библиотекарь", "traits": "Спокойная",
                    "speech_style": "Просто", "visual_description": "Adult librarian",
                    "confirmation": "Анна. Слушаю.", "model": "test", "latency": 0, "usage": {}}
         self.model.generate = Mock(return_value=profile)
-        self.app.handle("Джокер, стань библиотекарем")
+        self.app.handle("/role библиотекарем")
         self.assertEqual(self.game.task["kind"], "follow")
         self.assertEqual(self.entry.stop_calls, 0)
 
@@ -173,7 +174,7 @@ class MinecraftTests(unittest.TestCase):
             self.game.work_once()
         self.game.accept(self.event("стоп", sender="Guest"))
         self.assertEqual(self.app.active, "joker")
-        self.assertEqual(self.model.calls, 0)
+        self.assertEqual(self.model.calls, 1)
         self.assertEqual(self.entry.stop_calls, 0)
 
     def test_public_game_context_never_contains_private_owner_memory(self):
@@ -258,7 +259,7 @@ class MinecraftTests(unittest.TestCase):
     def test_existing_game_task_after_reconnect_requires_stop(self):
         self.entry.active = True
         self.game.task = None
-        self.assertIn("стоп", self.app.handle("За мной")["reply"])
+        self.assertIn("стоп", self.app.minecraft.execute("follow")["detail"])
         self.assertEqual(self.entry.chats, [])
 
     def test_panel_controls_send_game_actions_without_model_and_require_key(self):
@@ -297,9 +298,9 @@ class MinecraftTests(unittest.TestCase):
             thread.join(3)
 
     def test_all_game_action_kinds_have_no_model_calls(self):
-        for item in ("16 дуба", "8 булыжника", "3 земли"):
+        for item, count in (("oak_log",16), ("cobblestone",8), ("dirt",3)):
             self.app.stop()
-            self.app.handle("Принеси " + item)
+            self.game.execute("deliver", item=item, count=count)
         self.assertEqual(self.entry.commands, ["@get oak_log 16", "@get cobblestone 8", "@get dirt 3"])
         self.assertEqual(self.model.calls, 0)
 

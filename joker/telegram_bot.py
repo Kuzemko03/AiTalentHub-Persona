@@ -155,7 +155,8 @@ class TelegramRunner:
                     reply = self.app.command(job["text"], expected_revision=revision)
                     result = {"reply": reply, "_revision": self.app.store.get("response_revision", 0)}
                 elif topic is None:
-                    result = self.app.reply(job["text"], expected_revision=revision)
+                    result = self.app.reply(job["text"], expected_revision=revision,
+                                            request_id="telegram:" + str(job["update_id"]))
                 else:
                     action = job["text"].strip().partition(" ")[2].partition(" ")[0].casefold()
                     draft = self.app.channel.generate(expected_revision=revision, topic=topic, auto_role=action in ("авто", "auto"))
@@ -181,6 +182,8 @@ class TelegramRunner:
                     continue
                 self.api.send(job["chat_id"], job["reply"], keyboard(self.app))
                 self.app.store.job_status(job["update_id"], "sent", job["reply"], job["error"])
+                self.app.experience.record("owner", "telegram", "reply.sent",
+                    {"update_id": job["update_id"]}, "owner:telegram:" + str(job["update_id"]))
 
     def worker(self):
         while not self.shutdown.is_set():

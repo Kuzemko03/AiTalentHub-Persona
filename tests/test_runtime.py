@@ -60,7 +60,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_mask_and_memory_survive_new_process(self):
         self.app.handle("/remember Хочу построить дом")
-        self.app.handle("Джокер, будь ИИ-инженером")
+        self.app.handle("/mask engineer")
         self.app.store.close()
         self.app = App(self.settings, FakeBackend())
         self.assertEqual(self.app.active, "engineer")

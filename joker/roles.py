@@ -3,6 +3,7 @@ import json
 import re
 import threading
 import uuid
+from contextlib import nullcontext
 
 from .backends import Cancelled, ModelError
 
@@ -21,25 +22,14 @@ def role_request(text):
     token, _, argument = text.partition(" ")
     if token.split("@", 1)[0].casefold() in ("/role", "/роль"):
         return argument.strip() or None
-    match = re.fullmatch(
-        r"(?:джокер[\s,!:—-]+)?(?:теперь\s+)?(?:будь|стань|побудь|превратись\s+в)\s+(.+)",
-        text, re.IGNORECASE | re.DOTALL)
-    return match.group(1).strip().rstrip(".! ") if match else None
+    return None
+
 
 
 def find_role(masks, requested):
     value = requested.casefold().strip().rstrip(".! ")
     for mask in reversed(list(masks.values())):
         names = [mask["id"], mask["display_name"], mask["role"], *mask.get("aliases", [])]
-        def instrumental(word):
-            irregular = {"павел": "павлом", "пётр": "петром", "лев": "львом"}
-            if word in irregular:
-                return irregular[word]
-            for ending, replacement in (("а", "ой"), ("я", "ей"), ("ь", "ем"), ("й", "ем")):
-                if word.endswith(ending):
-                    return word[:-1] + replacement
-            return word + ("ем" if word.endswith(("ч", "щ", "ж", "ш", "ц")) else "ом")
-        names.append(" ".join(instrumental(word) for word in mask["display_name"].casefold().split()))
         if value in [n.casefold() for n in names]:
             return mask["id"]
     return None
@@ -78,7 +68,7 @@ class RoleService:
     def __init__(self, app):
         self.app = app
 
-    def adopt(self, description, expected_revision=None):
+    def adopt(self, description, expected_revision=None, *, held_cancel=None, before_install=None):
         if not isinstance(description, str) or not 1 <= len(description.strip()) <= 2000:
             raise ValueError("Опиши роль в пределах 2000 символов.")
         app = self.app
@@ -87,11 +77,12 @@ class RoleService:
                 raise Cancelled("Смена роли отменена.")
             if len(app.store.get("custom_masks", {})) >= 100:
                 raise ValueError("Сохранено 100 своих ролей. Можно вернуться к любой из них по имени.")
-            app.cancel_reply()
+            if held_cancel is None:
+                app.cancel_reply()
             revision = app.store.get("response_revision", 0)
-        cancel = threading.Event()
+        cancel = held_cancel or threading.Event()
         call_id = None
-        with app.generation:
+        with (app.generation if held_cancel is None else nullcontext()):
             try:
                 with app.guard:
                     if revision != app.store.get("response_revision", 0):
@@ -120,6 +111,8 @@ class RoleService:
                 with app.guard:
                     if cancel.is_set() or revision != app.store.get("response_revision", 0):
                         raise Cancelled("Смена роли отменена.")
+                    if before_install is not None:
+                        before_install()
                     profile.update(id="custom_" + uuid.uuid4().hex[:12], aliases=[description.strip()])
                     custom = app.store.get("custom_masks", {})
                     custom[profile["id"]] = profile
@@ -128,6 +121,8 @@ class RoleService:
                     reply = app.switch(profile["id"])
                     app.store.finish_call(call_id, {"status": "done", "purpose": "role", "model": result["model"],
                                                     "latency": result["latency"], "usage": result["usage"]})
+                    if held_cancel is not None:
+                        return {"reply": reply, "_revision": app.store.get("response_revision", 0), "_mask": profile["id"]}
                     return reply
             except (ValueError, ModelError) as exc:
                 if call_id is not None:
@@ -138,5 +133,5 @@ class RoleService:
                 raise
             finally:
                 with app.guard:
-                    if app.active_cancel is cancel:
+                    if held_cancel is None and app.active_cancel is cancel:
                         app.active_cancel = None

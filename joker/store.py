@@ -51,6 +51,14 @@ class Store:
                   label TEXT NOT NULL, PRIMARY KEY(source,target));
                 CREATE INDEX IF NOT EXISTS memory_link_target ON memory_links(actor,target);
                 CREATE INDEX IF NOT EXISTS facts_actor ON facts(actor,at);
+                CREATE TABLE IF NOT EXISTS experience_events (
+                  id INTEGER PRIMARY KEY, scope TEXT NOT NULL, source TEXT NOT NULL,
+                  kind TEXT NOT NULL, actor TEXT NOT NULL, turn_id TEXT NOT NULL,
+                  at TEXT NOT NULL, payload TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS experience_scope ON experience_events(scope,id);
+                CREATE TABLE IF NOT EXISTS tool_effects (
+                  turn_id TEXT PRIMARY KEY, actor TEXT NOT NULL, name TEXT NOT NULL,
+                  status TEXT NOT NULL, result TEXT NOT NULL, at TEXT NOT NULL);
             """)
 
     def recover_jobs(self):

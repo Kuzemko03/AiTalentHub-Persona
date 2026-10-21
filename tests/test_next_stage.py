@@ -86,7 +86,7 @@ class Fixture(unittest.TestCase):
 class DeliveryTests(Fixture):
     def test_come_stops_only_after_observing_owner_nearby(self):
         self.entry.distance = 20
-        self.app.handle("Джокер, подойди ко мне")
+        self.app.minecraft.execute("come")
         self.app.minecraft.refresh()
         self.assertEqual(self.entry.stop_calls, 0)
         self.entry.distance = 2
@@ -99,14 +99,14 @@ class DeliveryTests(Fixture):
         for _ in range(4): self.app.minecraft.refresh()
 
     def test_collect_confirms_inventory_without_giving_it_away(self):
-        self.app.handle("добудь 16 дуба")
+        self.app.minecraft.execute("collect", item="oak_log", count=16)
         self.app.minecraft.refresh()
         self.assertEqual(self.app.minecraft.task["state"], "collected")
         self.assertEqual(self.entry.items[0][1], 64)
         self.assertEqual(self.entry.clicks, [])
 
     def test_delivery_of_16_never_throws_a_stack_of_64(self):
-        self.app.handle("принеси 16 дуба")
+        self.app.minecraft.execute("deliver", item="oak_log", count=16)
         self.advance_to_handover()
         for _ in range(18): self.app.minecraft.refresh()
         self.assertEqual(self.app.minecraft.task["state"], "delivered_unverified")
@@ -117,13 +117,13 @@ class DeliveryTests(Fixture):
 
     def test_whole_stack_handover_and_main_slot_mapping(self):
         self.entry.items = {9: ["cobblestone", 64], 10: ["cobblestone", 64]}
-        self.app.handle("принеси 128 булыжника")
+        self.app.minecraft.execute("deliver", item="cobblestone", count=128)
         for _ in range(8): self.app.minecraft.refresh()
         self.assertEqual(self.entry.clicks, [(9, 1, "THROW"), (10, 1, "THROW")])
         self.assertEqual(self.app.minecraft.task["state"], "delivered_unverified")
 
     def test_owner_out_of_range_and_open_menu_prevent_drops(self):
-        self.app.handle("принеси 16 дуба")
+        self.app.minecraft.execute("deliver", item="oak_log", count=16)
         self.advance_to_handover()
         self.entry.distance = 20
         self.app.minecraft.refresh()
@@ -134,7 +134,7 @@ class DeliveryTests(Fixture):
         self.assertEqual(self.entry.clicks, [])
 
     def test_lost_drop_ack_never_retries(self):
-        self.app.handle("принеси 16 дуба")
+        self.app.minecraft.execute("deliver", item="oak_log", count=16)
         self.advance_to_handover()
         self.entry.ack = False
         self.app.minecraft.refresh()
@@ -143,7 +143,7 @@ class DeliveryTests(Fixture):
         self.assertEqual(self.app.minecraft.task["state"], "unconfirmed")
 
     def test_inventory_does_not_change_after_ack_never_retries(self):
-        self.app.handle("принеси 16 дуба")
+        self.app.minecraft.execute("deliver", item="oak_log", count=16)
         self.advance_to_handover()
         self.entry.clickUiSlot = Mock(return_value=True)
         self.app.minecraft.refresh()
@@ -153,7 +153,7 @@ class DeliveryTests(Fixture):
         self.assertEqual(self.app.minecraft.task["state"], "unconfirmed")
 
     def test_stop_cancels_the_remaining_handover(self):
-        self.app.handle("принеси 16 дуба")
+        self.app.minecraft.execute("deliver", item="oak_log", count=16)
         self.advance_to_handover()
         self.app.minecraft.refresh()
         self.app.stop()
@@ -162,7 +162,7 @@ class DeliveryTests(Fixture):
         self.assertIsNone(self.app.minecraft.task)
 
     def test_time_limit_stops_without_claiming_delivery(self):
-        self.app.handle("принеси 16 дуба")
+        self.app.minecraft.execute("deliver", item="oak_log", count=16)
         self.app.minecraft.task["started_at"] -= 901
         self.app.minecraft.refresh()
         self.assertEqual(self.app.minecraft.task["state"], "failed")

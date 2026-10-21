@@ -47,7 +47,7 @@ class RoleTests(unittest.TestCase):
 
     def test_free_role_description_persists_and_keeps_owner_memory(self):
         self.app.store.remember("owner", "Меня зовут Тимофей")
-        description = "Джокер, стань сварщицей Мариной. Рыжая, 38 лет, спокойная, с сухим юмором."
+        description = "/role сварщицей Мариной. Рыжая, 38 лет, спокойная, с сухим юмором."
         result = self.app.handle(description)
         self.assertEqual(result["reply"], PROFILE["confirmation"])
         self.assertEqual(self.backend.schema, ROLE_SCHEMA)
@@ -59,21 +59,21 @@ class RoleTests(unittest.TestCase):
         self.assertEqual(self.app.active, saved_id)
         self.assertEqual(self.app.masks[saved_id]["visual_description"], PROFILE["visual_description"])
         self.assertEqual(self.app.store.facts("owner"), ["Меня зовут Тимофей"])
-        self.app.handle("Джокер, стань Мариной")
+        self.app.handle("/mask " + saved_id)
         self.assertEqual(self.backend.calls, 1)
 
     def test_known_role_is_instant_but_added_details_generate_new_profile(self):
-        self.app.handle("Джокер, стань сантехником")
+        self.app.handle("/mask plumber")
         self.assertEqual(self.app.active, "plumber")
         self.assertEqual(self.backend.calls, 0)
-        self.app.handle("Джокер, стань сантехником Павлом, 30 лет, очень терпеливым")
+        self.app.handle("/role сантехником Павлом, 30 лет, очень терпеливым")
         self.assertEqual(self.backend.calls, 1)
 
     def test_bad_profile_never_changes_current_role(self):
         self.app.switch("plumber")
         self.backend.generate = Mock(return_value={"display_name": "Недостаточно"})
         with self.assertRaises(ModelError):
-            self.app.handle("стань смотрителем маяка")
+            self.app.handle("/role смотрителем маяка")
         self.assertEqual(self.app.active, "plumber")
         self.assertFalse(self.app.store.get("custom_masks", {}))
         self.assertFalse(self.app.status()["generating"])
@@ -89,7 +89,7 @@ class RoleTests(unittest.TestCase):
         failures = []
         def adopt():
             try:
-                self.app.handle("стань сварщицей")
+                self.app.handle("/role сварщицей")
             except Cancelled:
                 failures.append("cancelled")
         worker = threading.Thread(target=adopt)
@@ -113,7 +113,8 @@ class RoleTests(unittest.TestCase):
 
     def test_role_request_is_anchored_and_preserves_description_case(self):
         self.assertIsNone(role_request("Что значит стань сантехником?"))
-        self.assertEqual(role_request("Джокер, стань Павлом. Говори спокойно."), "Павлом. Говори спокойно")
+        self.assertIsNone(role_request("Джокер, стань Павлом. Говори спокойно."))
+        self.assertEqual(role_request("/role Павлом. Говори спокойно."), "Павлом. Говори спокойно.")
         self.app.handle("Джокер, стань сварщицей", owner=False)
         self.assertEqual(self.backend.calls, 0)
 
