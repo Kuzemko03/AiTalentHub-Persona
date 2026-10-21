@@ -15,7 +15,7 @@ NICK = re.compile(r"[A-Za-z0-9_]{3,16}\Z")
 STOP = {"стоп", "/stop", "/стоп"}
 CONTROL = {"/mask", "/маска", "/reset", "/сброс", "/roles", "/роли", "/status", "/статус",
            "/сон", "/sleep", "/проснись", "/wake", "/заметка", "/note", "/заметки", "/notes",
-           "/найди", "/find", "/забудь", "/forget", "/связь", "/link", "/поручения", "/queue"}
+           "/найди", "/find", "/забудь", "/forget", "/связь", "/link", "/поручения", "/queue", "/голос", "/voice"}
 
 
 
@@ -376,8 +376,7 @@ class MinecraftService:
                         and revision == self.app.store.get("response_revision", 0)):
                     self.entry.ChatMessage(reply)
                     self.event("reply.submitted", {"actor": sender, "chars": len(reply), "source": source})
-                    if source == "voice":
-                        self.app.voice.enqueue(reply, revision, epoch)
+                    self.app.voice.enqueue(reply, revision, epoch)
             return True
         except (Cancelled, ModelError, ValueError):
             return True

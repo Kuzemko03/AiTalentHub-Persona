@@ -56,6 +56,10 @@ class Settings:
     tts_model: str = ""
     tts_key: str = ""
     tts_voice: str = ""
+    tts_backend: str = "http"
+    tts_voices_dir: str = ""
+    tts_daily_characters: int = 20000
+    voice_mode: str = "conversation"
     voice_device: str = ""
     voice_input_device: str = ""
 
@@ -90,5 +94,8 @@ class Settings:
                    stt_key=values.get("STT_API_KEY", ""),
                    tts_url=values.get("TTS_URL", ""), tts_model=values.get("TTS_MODEL", ""),
                    tts_key=values.get("TTS_API_KEY", ""), tts_voice=values.get("TTS_VOICE", ""),
+                   tts_backend=values.get("TTS_BACKEND", "http"), tts_voices_dir=values.get("TTS_VOICES_DIR", ""),
+                   tts_daily_characters=int(values.get("TTS_DAILY_CHARACTERS", "20000")),
+                   voice_mode=values.get("VOICE_MODE", "conversation"),
                    voice_device=values.get("VOICE_OUTPUT_DEVICE", ""),
                    voice_input_device=values.get("VOICE_INPUT_DEVICE", ""))

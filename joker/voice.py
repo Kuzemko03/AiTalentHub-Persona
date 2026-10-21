@@ -17,7 +17,8 @@ import urllib.request
 import uuid
 import wave
 
-from .backends import ModelError
+from .backends import Cancelled, ModelError
+from .tts import MAX_TEXT, PiperTTS, installed, pcm_wav, speech_text
 
 RATE = 48000
 MAX_PCM = RATE * 2 * 10
@@ -51,6 +52,10 @@ def read_wav(raw):
 class AudioHTTP:
     def __init__(self, settings):
         self.settings = settings
+        self.local = PiperTTS(settings)
+
+    def close(self):
+        self.local.close()
 
     def request(self, url, key, body, content_type):
         parsed = urllib.parse.urlsplit(url)
@@ -89,10 +94,18 @@ class AudioHTTP:
         except (ValueError, TypeError):
             raise ModelError("Распознавание вернуло некорректный текст.") from None
 
-    def synthesize(self, text, voice):
+    def synthesize(self, text, voice, cancel=None):
+        if self.settings.tts_backend == "piper":
+            return self.local.synthesize(text, voice, cancel)
+        if self.settings.tts_backend != "http":
+            raise ValueError("TTS_BACKEND должен быть http или piper.")
+        if cancel is not None and cancel.is_set():
+            raise Cancelled("Синтез отменён.")
         raw = self.request(self.settings.tts_url, self.settings.tts_key,
             json.dumps({"model": self.settings.tts_model, "voice": voice, "input": text,
                         "response_format": "wav"}, ensure_ascii=False).encode(), "application/json")
+        if cancel is not None and cancel.is_set():
+            raise Cancelled("Синтез отменён.")
         return read_wav(raw)
 
 
@@ -116,12 +129,31 @@ class Voice:
         self.last_stt = 0
         self.playing = False
         self.session = 0
+        self.mode = app.store.get("voice_mode", app.settings.voice_mode)
+        self.preview_lock = threading.Lock()
+
+    def selected_voice(self):
+        return self.voices.get(self.app.active, self.app.settings.tts_voice)
+
+    def tts_status(self):
+        s = self.app.settings
+        voice = self.selected_voice()
+        choices = installed(s) if s.tts_backend == "piper" else [
+            {"id": v, "label": v} for v in sorted(set(self.voices.values()) | {s.tts_voice}) if v]
+        import importlib.util
+        ready = (bool(voice and s.tts_url and s.tts_model) if s.tts_backend == "http" else
+                 s.tts_backend == "piper" and importlib.util.find_spec("piper") is not None
+                 and voice in {v["id"] for v in choices})
+        return {"backend": s.tts_backend, "ready": ready, "selected_voice": voice, "voices": choices,
+                "daily_characters": s.tts_daily_characters}
 
     def status(self):
         with self.lock:
             return {"enabled": self.enabled, "detail": self.detail, "playing": self.playing,
                     "queued": self.speech.qsize(), "metrics": dict(self.metrics),
-                    "role_voices": dict(self.voices)}
+                    "role_voices": dict(self.voices), "mode": self.mode, "tts": self.tts_status(),
+                    "output_device_configured": bool(self.app.settings.voice_device),
+                    "stt_configured": bool(self.app.settings.stt_url and self.app.settings.stt_model)}
 
     def valid(self, revision, epoch):
         return (self.enabled and not self.shutdown.is_set() and not self.app.runtime.sleeping()
@@ -129,7 +161,7 @@ class Voice:
                 and (epoch is None or epoch == self.app.minecraft.epoch and self.app.minecraft.entry is not None))
 
     def feed(self, player, pcm, source="game"):
-        if (not self.enabled or self.shutdown.is_set() or self.playing or self.app.runtime.sleeping()
+        if (self.mode == "tts" or not self.enabled or self.shutdown.is_set() or self.playing or self.app.runtime.sleeping()
                 or not re.fullmatch(r"[A-Za-z0-9_]{3,16}", player)
                 or player.casefold() == self.app.settings.minecraft_bot.casefold()
                 or source != "call" and not self.app.settings.voice_guests and player.casefold() != self.app.settings.minecraft_owner.casefold()
@@ -171,6 +203,8 @@ class Voice:
                     pass
 
     def listen_once(self):
+        if self.mode == "tts":
+            return False
         self.flush()
         try:
             player, pcm, revision, epoch, received = self.audio.get_nowait()
@@ -207,6 +241,8 @@ class Voice:
         return True
 
     def call_once(self):
+        if self.mode == "tts":
+            return False
         try:
             text, revision, session = self.calls.get_nowait()
         except queue.Empty:
@@ -224,9 +260,13 @@ class Voice:
     def enqueue(self, text, revision, epoch):
         if not self.valid(revision, epoch):
             return
-        voice = self.voices.get(self.app.active, self.app.settings.tts_voice)
+        text = speech_text(text)
+        if not text or len(text) > MAX_TEXT:
+            self.detail = "Реплика не озвучена: нужен текст до 1000 символов. Полный ответ доступен в чате."
+            return
+        voice = self.selected_voice()
         try:
-            self.speech.put_nowait((text[:1000], voice, revision, epoch, time.monotonic()))
+            self.speech.put_nowait((text, voice, revision, epoch, time.monotonic()))
         except queue.Full:
             self.detail = "Очередь голоса заполнена. Текст остаётся в игровом чате."
 
@@ -237,16 +277,18 @@ class Voice:
             return False
         if not self.valid(revision, epoch):
             return True
-        started = time.monotonic()
         session = self.session
-        pcm, rate, channels = self.provider.synthesize(text, voice)
-        if session != self.session or not self.valid(revision, epoch):
+        cancel = self.cancel
+        try:
+            pcm, rate, channels = self.render(text, voice, cancel)
+        except Cancelled:
+            return True
+        if cancel.is_set() or session != self.session or not self.valid(revision, epoch):
             return True
         import sounddevice
         device = self.app.settings.voice_device
         if device.isdecimal():
             device = int(device)
-        cancel = self.cancel
         with sounddevice.RawOutputStream(samplerate=rate, channels=channels, dtype="int16", device=device) as output:
             self.playing = True
             try:
@@ -257,11 +299,66 @@ class Voice:
                         break
                     output.write(pcm[offset:offset + chunk])
                     if offset == 0:
-                        self.metrics.update(tts_ms=round((time.monotonic() - started) * 1000),
-                                            text_to_sound_ms=round((time.monotonic() - queued) * 1000))
+                        self.metrics.update(text_to_sound_ms=round((time.monotonic() - queued) * 1000))
             finally:
                 self.playing = False
         return True
+
+    def render(self, text, voice, cancel):
+        if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
+            raise ValueError("Для синтеза нужен текст от 1 до 1000 символов.")
+        if cancel.is_set():
+            raise Cancelled("Синтез отменён.")
+        with self.app.guard:
+            day = self.app.store.now()[:10]
+            budget = self.app.store.get("tts_budget", {"day": day, "used": 0})
+            if budget["day"] != day:
+                budget = {"day": day, "used": 0}
+            if budget["used"] + len(text) > self.app.settings.tts_daily_characters:
+                raise ModelError("Дневной лимит символов TTS исчерпан. Текстовый ответ остаётся доступен.")
+            budget["used"] += len(text)
+            self.app.store.set("tts_budget", budget)
+        started = time.monotonic()
+        pcm, rate, channels = self.provider.synthesize(text, voice, cancel)
+        if cancel.is_set():
+            raise Cancelled("Синтез отменён.")
+        self.metrics.update(tts_ms=round((time.monotonic() - started) * 1000),
+                            tts_audio_seconds=round(len(pcm) / rate / channels / 2, 2))
+        return pcm, rate, channels
+
+    def preview(self, text, mask=None):
+        if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
+            raise ValueError("Для примера нужен текст от 1 до 1000 символов.")
+        if not self.preview_lock.acquire(blocking=False):
+            raise ModelError("Пример голоса уже готовится.")
+        try:
+            with self.app.guard:
+                if mask is not None and mask != self.app.active:
+                    raise Cancelled("Роль изменилась; обнови голосовой профиль.")
+                cancel = self.cancel
+                revision = self.app.store.get("response_revision", 0)
+                voice = self.selected_voice()
+            text = speech_text(text)
+            if not text or not voice:
+                raise ValueError("Нужны текст и выбранный голос.")
+            pcm, rate, channels = self.render(text, voice, cancel)
+            if cancel.is_set() or revision != self.app.store.get("response_revision", 0):
+                raise Cancelled("Пример голоса отменён.")
+            return pcm_wav(pcm, rate, channels)
+        finally:
+            self.preview_lock.release()
+
+    def set_voice(self, voice, mask=None):
+        if not isinstance(voice, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}", voice):
+            raise ValueError("Укажи ID голоса из своего TTS-сервиса или установленной модели Piper.")
+        if self.app.settings.tts_backend == "piper" and voice not in {v["id"] for v in installed(self.app.settings)}:
+            raise ValueError("Сначала установи этот голос Piper.")
+        with self.app.guard:
+            if mask is not None and mask != self.app.active:
+                raise Cancelled("Роль изменилась; обнови голосовой профиль.")
+            self.cancel_pending()
+            self.voices[self.app.active] = voice
+            self.app.store.set("role_voices", self.voices)
 
     def cancel_pending(self):
         self.cancel.set()
@@ -283,27 +380,34 @@ class Voice:
             self.close()
         elif arg.startswith("тембр "):
             voice = arg.removeprefix("тембр ").strip()
-            if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}", voice):
-                return "Укажи ID голоса из своего TTS-сервиса."
-            self.voices[self.app.active] = voice
-            self.app.store.set("role_voices", self.voices)
+            self.set_voice(voice)
             return "Тембр сохранён для текущей маски."
         return self.detail
 
-    def start(self):
+    def start(self, mode=None):
+        mode = mode or self.mode
+        if mode not in ("tts", "conversation"):
+            raise ValueError("Режим голоса: tts или conversation.")
         if self.enabled:
+            if mode != self.mode:
+                raise ValueError("Сначала выключи голос, затем выбери другой режим.")
             return
         s = self.app.settings
-        if not all((s.stt_url, s.stt_model, s.tts_url, s.tts_model, s.tts_voice, s.voice_device)):
-            raise ValueError("Настрой STT_URL/MODEL, TTS_URL/MODEL/VOICE и VOICE_OUTPUT_DEVICE в .env.")
+        if not self.tts_status()["ready"] or not s.voice_device:
+            raise ValueError("Настрой TTS, выбранный голос и VOICE_OUTPUT_DEVICE. Пример можно создать без аудиоустройства.")
+        if mode == "conversation" and not all((s.stt_url, s.stt_model)):
+            raise ValueError("Для разговора настрой STT_URL/MODEL; для одной озвучки выбери режим tts.")
         import importlib.util
         if importlib.util.find_spec("sounddevice") is None:
             raise ValueError('Установи голос: pip install -e ".[voice]"')
         self.shutdown.clear()
+        self.mode = mode
+        self.app.store.set("voice_mode", mode)
         self.session += 1
         self.enabled = True
-        self.detail = "Голос включён. Обращайся по имени; вывод на выбранное аудиоустройство."
-        if s.voice_input_device:
+        self.detail = ("Озвучка включена; микрофон и STT не используются." if mode == "tts" else
+                       "Голос включён. Обращайся по имени; вывод на выбранное аудиоустройство.")
+        if mode == "conversation" and s.voice_input_device:
             import sounddevice
             device = int(s.voice_input_device) if s.voice_input_device.isdecimal() else s.voice_input_device
             session = self.session
@@ -322,9 +426,11 @@ class Voice:
             except Exception:
                 self.close()
                 raise ValueError("Не удалось открыть VOICE_INPUT_DEVICE, 48 кГц mono PCM16.") from None
+        workers = [(self.speak_once, "joker-tts")]
+        if mode == "conversation":
+            workers.extend(((self.listen_once, "joker-stt"), (self.call_once, "joker-call")))
         self.threads = [threading.Thread(target=self.run, args=(fn, self.session), daemon=True, name=name)
-                        for fn, name in ((self.listen_once, "joker-stt"), (self.speak_once, "joker-tts"),
-                                         (self.call_once, "joker-call"))]
+                        for fn, name in workers]
         for thread in self.threads:
             thread.start()
 
@@ -332,6 +438,8 @@ class Voice:
         while session == self.session and not self.shutdown.is_set():
             try:
                 step()
+            except Cancelled:
+                pass
             except Exception:
                 self.detail = "Ошибка аудио. Проверь сервис и устройство; текстовый чат доступен."
             self.shutdown.wait(.1)
@@ -341,6 +449,9 @@ class Voice:
         self.enabled = False
         self.shutdown.set()
         self.cancel_pending()
+        close_provider = getattr(self.provider, "close", None)
+        if callable(close_provider):
+            close_provider()
         if self.input_stream:
             try:
                 self.input_stream.abort()

@@ -53,7 +53,7 @@ def make_server(app, port=None):
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'nonce-" + csrf
-                             + "'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+                             + "'; style-src 'unsafe-inline'; img-src 'self'; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
             super().end_headers()
 
         def write_body(self, raw):
@@ -205,9 +205,23 @@ def make_server(app, port=None):
                     self.respond({"reply": result["detail"], "errands": result})
                 elif self.path == "/api/voice":
                     action = value.get("action")
-                    if action not in ("on", "off"):
+                    if action == "profile":
+                        app.voice.set_voice(value["voice"], mask=value["mask"])
+                        return self.respond({"reply": "Голос сохранён для текущей роли."})
+                    if action == "on":
+                        app.voice.start(mode=value.get("mode"))
+                        return self.respond({"reply": app.voice.detail})
+                    if action != "off":
                         raise ValueError("Неизвестное действие.")
                     self.respond(app.handle("/голос " + action))
+                elif self.path == "/api/voice/preview":
+                    raw = app.voice.preview(value["text"], mask=value["mask"])
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/wav")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Disposition", 'inline; filename="joker-voice-preview.wav"')
+                    self.end_headers()
+                    self.write_body(raw)
                 elif self.path == "/api/memory":
                     actor = app.memory.scope(value.get("scope", "private"))
                     action = value.get("action")

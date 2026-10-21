@@ -13,6 +13,10 @@ from .lifecycle import InstanceLock, snapshot
 
 
 def main():
+    if sys.argv[1:2] == ["tts"]:
+        from .tts import cli
+        cli(sys.argv[2:], Settings.load())
+        return
     if sys.argv[1:2] == ["channel"]:
         from .channel import cli
         cli(sys.argv[2:])

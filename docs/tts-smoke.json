@@ -1,0 +1,44 @@
+{
+  "date": "2026-10-22",
+  "platform": "Windows",
+  "piper_version": "1.8.0",
+  "samples": [
+    {
+      "voice": "ru_RU-denis-medium",
+      "persona": "joker",
+      "characters": 112,
+      "seconds": 8.45,
+      "render_ms": 7000,
+      "sample_rate": 22050,
+      "non_silent": true,
+      "local_file": "joker-denis-example.wav"
+    },
+    {
+      "voice": "ru_RU-denis-medium",
+      "persona": "joker",
+      "characters": 72,
+      "seconds": 4.83,
+      "render_ms": 265,
+      "sample_rate": 22050,
+      "non_silent": true,
+      "local_file": "joker-denis-warm.wav"
+    },
+    {
+      "voice": "ru_RU-irina-medium",
+      "persona": "housewife",
+      "characters": 131,
+      "seconds": 10.16,
+      "render_ms": 6656,
+      "sample_rate": 22050,
+      "non_silent": true,
+      "local_file": "joker-irina-example.wav"
+    }
+  ],
+  "cancellation": {
+    "cancelled": true,
+    "worker_closed": true,
+    "wait_ms": 31
+  },
+  "audio_devices_opened": false,
+  "game_validation": "deferred"
+}

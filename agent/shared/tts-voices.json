@@ -1,0 +1,54 @@
+[
+  {
+    "id": "ru_RU-denis-medium",
+    "label": "Денис · русский",
+    "source": "https://huggingface.co/rhasspy/piper-voices",
+    "revision": "5041a7a49ae5b3a0f30e6837769eb03fdbb231bd",
+    "files": [
+      {
+        "name": "ru_RU-denis-medium.onnx",
+        "url": "https://huggingface.co/rhasspy/piper-voices/resolve/5041a7a49ae5b3a0f30e6837769eb03fdbb231bd/ru/ru_RU/denis/medium/ru_RU-denis-medium.onnx",
+        "size": 63201294,
+        "sha256": "15fab56e11a097858ee115545d0f697fc2a316c41a291a5362349fb870411b0a"
+      },
+      {
+        "name": "ru_RU-denis-medium.onnx.json",
+        "url": "https://huggingface.co/rhasspy/piper-voices/resolve/5041a7a49ae5b3a0f30e6837769eb03fdbb231bd/ru/ru_RU/denis/medium/ru_RU-denis-medium.onnx.json",
+        "size": 4823,
+        "sha256": "831c860dac0b5073eaa81610a0a638ec23d90a6cf8e5f871b4485c2cec3767c8"
+      },
+      {
+        "name": "ru_RU-denis-medium.MODEL_CARD",
+        "url": "https://huggingface.co/rhasspy/piper-voices/resolve/5041a7a49ae5b3a0f30e6837769eb03fdbb231bd/ru/ru_RU/denis/medium/MODEL_CARD",
+        "size": 276,
+        "sha256": "8b5d685dd80f8ad3f8dbbe1c56b16bb0809f00c144af3642dbcf3b707eb89c12"
+      }
+    ]
+  },
+  {
+    "id": "ru_RU-irina-medium",
+    "label": "Ирина · русский",
+    "source": "https://huggingface.co/rhasspy/piper-voices",
+    "revision": "5041a7a49ae5b3a0f30e6837769eb03fdbb231bd",
+    "files": [
+      {
+        "name": "ru_RU-irina-medium.onnx",
+        "url": "https://huggingface.co/rhasspy/piper-voices/resolve/5041a7a49ae5b3a0f30e6837769eb03fdbb231bd/ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx",
+        "size": 63201294,
+        "sha256": "8ff38212d23da300bbe3705c645e6e5b9475f0bfde01558eb17813e22acaaaaa"
+      },
+      {
+        "name": "ru_RU-irina-medium.onnx.json",
+        "url": "https://huggingface.co/rhasspy/piper-voices/resolve/5041a7a49ae5b3a0f30e6837769eb03fdbb231bd/ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx.json",
+        "size": 4765,
+        "sha256": "c2ec28bb38e2b59e93b959b3e40348c1afebbd272f30fed5d41205d08e98a9d7"
+      },
+      {
+        "name": "ru_RU-irina-medium.MODEL_CARD",
+        "url": "https://huggingface.co/rhasspy/piper-voices/resolve/5041a7a49ae5b3a0f30e6837769eb03fdbb231bd/ru/ru_RU/irina/medium/MODEL_CARD",
+        "size": 271,
+        "sha256": "f4fc2deb0e8c6219f29202b8dd06c9638c5ffd50ad5c6b2c90cf1aa59d507593"
+      }
+    ]
+  }
+]
