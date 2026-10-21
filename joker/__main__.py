@@ -9,6 +9,7 @@ from .config import Settings
 from .core import App
 from .panel import make_server
 from .telegram_bot import TelegramError, TelegramRunner, pair
+from .lifecycle import InstanceLock, snapshot
 
 
 def main():
@@ -17,12 +18,21 @@ def main():
         cli(sys.argv[2:])
         return
     parser = argparse.ArgumentParser(description="Джокер — персонаж со сменяемыми масками")
-    parser.add_argument("mode", choices=["chat", "serve", "telegram", "minecraft", "pair", "doctor", "ask"], nargs="?", default="chat")
+    parser.add_argument("mode", choices=["chat", "serve", "telegram", "minecraft", "pair", "doctor", "ask", "backup", "audio-devices"], nargs="?", default="chat")
     parser.add_argument("text", nargs="?")
     parser.add_argument("--telegram", action="store_true", help="подключить Telegram вместе с панелью")
     parser.add_argument("--minecraft", action="store_true", help="подключить Minecraft через UnionClef")
+    parser.add_argument("--voice", action="store_true", help="включить настроенное распознавание и синтез")
     args = parser.parse_args()
     settings = Settings.load()
+    if args.mode == "audio-devices":
+        try:
+            import sounddevice
+        except ImportError:
+            raise ValueError('Установи голос: pip install -e ".[voice]"') from None
+        for i, device in enumerate(sounddevice.query_devices()):
+            print(f"{i}: {device['name']} (in={device['max_input_channels']}, out={device['max_output_channels']})")
+        return
     if args.mode == "pair":
         pair(settings)
         return
@@ -35,15 +45,32 @@ def main():
                           "panel": f"http://127.0.0.1:{settings.panel_port}",
                           "minecraft": probe(settings)}, ensure_ascii=False, indent=2))
         return
-    app = App(settings)
+    lock = InstanceLock(settings.root)
+    if args.mode in ("serve", "telegram", "minecraft", "chat"):
+        lock.acquire()
+    app = None
     try:
+        app = App(settings)
+        if args.mode == "backup":
+            print(snapshot(app.store, settings.root))
+            return
+        if args.voice or settings.voice_enabled:
+            app.voice.start()
         if args.minecraft or args.mode == "minecraft" or settings.minecraft_enabled:
             app.minecraft.start()
+        if args.mode in ("serve", "telegram", "minecraft", "chat"):
+            app.runtime.start()
         run_app(app, args, parser)
     finally:
-        if args.mode == "serve" or app.minecraft.thread is not None:
-            app.stop()
-        app.minecraft.close()
+        if app:
+            app.runtime.close()
+            if args.mode in ("serve", "telegram", "minecraft", "chat") or app.minecraft.thread is not None:
+                # Preserve the user's autonomy preference for the next supervised start.
+                app.cancel_reply()
+                app.minecraft.stop_task()
+            app.voice.close()
+            app.minecraft.close()
+        lock.close()
 
 
 def run_app(app, args, parser):

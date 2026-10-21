@@ -41,6 +41,23 @@ class Settings:
     minecraft_bot: str = ""
     minecraft_port: int = 25333
     minecraft_callback_port: int = 25334
+    minecraft_server: str = ""
+    minecraft_autoconnect: bool = False
+    runtime_interval: int = 60
+    runtime_daily_requests: int = 20
+    quiet_hours: str = ""
+    utc_offset: int = 3
+    voice_enabled: bool = False
+    voice_guests: bool = False
+    stt_url: str = ""
+    stt_model: str = ""
+    stt_key: str = ""
+    tts_url: str = ""
+    tts_model: str = ""
+    tts_key: str = ""
+    tts_voice: str = ""
+    voice_device: str = ""
+    voice_input_device: str = ""
 
     @classmethod
     def load(cls, root: Path = ROOT):
@@ -60,4 +77,18 @@ class Settings:
                    minecraft_owner=values.get("MINECRAFT_OWNER", ""),
                    minecraft_bot=values.get("MINECRAFT_BOT", ""),
                    minecraft_port=int(values.get("MINECRAFT_PORT", "25333")),
-                   minecraft_callback_port=int(values.get("MINECRAFT_CALLBACK_PORT", "25334")))
+                   minecraft_callback_port=int(values.get("MINECRAFT_CALLBACK_PORT", "25334")),
+                   minecraft_server=values.get("MINECRAFT_SERVER", ""),
+                   minecraft_autoconnect=values.get("MINECRAFT_AUTOCONNECT", "0") == "1",
+                   runtime_interval=int(values.get("RUNTIME_INTERVAL", "60")),
+                   runtime_daily_requests=int(values.get("RUNTIME_DAILY_REQUESTS", "20")),
+                   quiet_hours=values.get("QUIET_HOURS", ""),
+                   utc_offset=int(values.get("UTC_OFFSET", "3")),
+                   voice_enabled=values.get("VOICE_ENABLED", "0") == "1",
+                   voice_guests=values.get("VOICE_GUESTS", "0") == "1",
+                   stt_url=values.get("STT_URL", ""), stt_model=values.get("STT_MODEL", ""),
+                   stt_key=values.get("STT_API_KEY", ""),
+                   tts_url=values.get("TTS_URL", ""), tts_model=values.get("TTS_MODEL", ""),
+                   tts_key=values.get("TTS_API_KEY", ""), tts_voice=values.get("TTS_VOICE", ""),
+                   voice_device=values.get("VOICE_OUTPUT_DEVICE", ""),
+                   voice_input_device=values.get("VOICE_INPUT_DEVICE", ""))

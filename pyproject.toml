@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aitalenthub-persona"
-version = "0.2.0"
+version = "0.3.0"
 description = "Joker character with switchable masks, Codex CLI, memory and Telegram"
 requires-python = ">=3.11"
 dependencies = []
@@ -12,6 +12,7 @@ license = {file = "LICENSE"}
 
 [project.optional-dependencies]
 minecraft = ["py4j==0.10.9.9"]
+voice = ["sounddevice==0.5.6"]
 
 [tool.setuptools]
 packages = ["joker"]

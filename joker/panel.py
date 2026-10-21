@@ -140,6 +140,25 @@ def make_server(app, port=None):
                     if not isinstance(action, str) or action not in actions:
                         raise ValueError("Неизвестное игровое действие.")
                     self.respond(app.handle(actions[action]))
+                elif self.path == "/api/runtime":
+                    actions = {"sleep": "/сон", "wake": "/проснись", "on": "/автономность вкл",
+                               "off": "/автономность выкл"}
+                    action = value.get("action")
+                    if action == "goal":
+                        goal = value.get("goal")
+                        if not isinstance(goal, str) or not goal.strip() or len(goal) > 1000:
+                            raise ValueError("Укажите цель.")
+                        reply = app.handle("/цель " + goal.strip())
+                    elif isinstance(action, str) and action in actions:
+                        reply = app.handle(actions[action])
+                    else:
+                        raise ValueError("Неизвестное действие.")
+                    self.respond(reply)
+                elif self.path == "/api/voice":
+                    action = value.get("action")
+                    if action not in ("on", "off"):
+                        raise ValueError("Неизвестное действие.")
+                    self.respond(app.handle("/голос " + action))
                 elif self.path == "/api/channel/bind":
                     info = app.channel.bind(value["target"])
                     self.respond({"reply": "Канал подключён: " + info["title"]})

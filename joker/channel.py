@@ -345,6 +345,8 @@ class ChannelService:
         self.store.update_channel_post(post_id, status="discarded")
 
     def next_draft(self, now=None):
+        if self.app.runtime.sleeping():
+            return {"action": "idle", "reason": "Персонаж спит"}
         status = self.status()
         if not status["target"] or not status["enabled"]:
             return {"action": "idle", "reason": "Канал не подключён или автопостинг выключен"}

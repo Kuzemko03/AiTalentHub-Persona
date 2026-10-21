@@ -39,6 +39,7 @@ class Entry:
     def inGame(self): return True
     def getUsername(self): return "JokerBot"
     def hasActiveTask(self): return self.active
+    def getInventoryFull(self): return {"ok": True, "slots": []}
     def ChatMessage(self, text): self.chats.append(text)
     def ExecuteCommand(self, text): self.commands.append(text)
     def stopPathing(self):
@@ -214,7 +215,7 @@ class MinecraftTests(unittest.TestCase):
         self.assertLessEqual(len(chat_text("т" * 500)), 240)
         self.assertNotIn("\n", chat_text("one\ntwo"))
 
-    def test_callbacks_ignore_raw_commands_voice_and_captcha_requests(self):
+    def test_callbacks_ignore_raw_commands_disabled_voice_and_captcha_requests(self):
         cb = GameCallbacks(self.game)
         self.assertEqual(cb.agentCommandRequest("/op Guest"), "not supported")
         cb.onCaptchaSolveRequest(b"test")

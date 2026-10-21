@@ -234,7 +234,9 @@ class TelegramRunner:
                     self.shutdown.wait(5)
         finally:
             self.shutdown.set()
-            self.app.stop()
+            self.app.runtime.close()
+            self.app.cancel_reply()
+            self.app.minecraft.stop_task()
             thread.join(timeout=self.app.settings.timeout + 2)
             if self.app.telegram_status["state"] != "failed":
                 self.state("stopped", "Telegram остановлен")

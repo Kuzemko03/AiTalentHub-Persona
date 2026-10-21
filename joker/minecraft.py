@@ -6,10 +6,12 @@ import threading
 import time
 
 from .backends import Cancelled, ModelError
+from .game_tasks import advance, TERMINAL, owner_distance
 
 NICK = re.compile(r"[A-Za-z0-9_]{3,16}\Z")
 STOP = {"стоп", "хватит", "отмена", "/stop", "/стоп", "подожди здесь", "жди здесь"}
-CONTROL = {"/mask", "/маска", "/reset", "/сброс", "/roles", "/роли", "/status", "/статус"}
+CONTROL = {"/mask", "/маска", "/reset", "/сброс", "/roles", "/роли", "/status", "/статус",
+           "/сон", "/sleep", "/проснись", "/wake"}
 ITEMS = {"дуб": "oak_log", "дуба": "oak_log", "дубовых брёвен": "oak_log",
          "дубовых бревен": "oak_log", "oak_log": "oak_log", "брёвна": "oak_log",
          "бревна": "oak_log", "булыжник": "cobblestone", "булыжника": "cobblestone",
@@ -49,6 +51,8 @@ class MinecraftService:
         self.busy = False
         self.epoch = 0
         self.thread = None
+        self.worker_thread = None
+        self.next_join = 0
 
     def status(self):
         with self.lock:
@@ -72,12 +76,24 @@ class MinecraftService:
                 port=self.settings.minecraft_callback_port, daemonize=True, daemonize_connections=True),
             python_server_entry_point=GameCallbacks(self))
         try:
+            if str(gateway.entry_point.getUsername()).casefold() != self.settings.minecraft_bot.casefold():
+                raise ValueError("Ник игрового клиента не совпадает с MINECRAFT_BOT.")
+            if (not gateway.entry_point.inGame() and self.settings.minecraft_autoconnect
+                    and not self.app.runtime.sleeping() and time.monotonic() >= self.next_join):
+                server = self.settings.minecraft_server
+                if (not re.fullmatch(r"[A-Za-z0-9.-]+(?::\d{1,5})?", server)
+                        or ":" in server and not 1 <= int(server.rsplit(":", 1)[1]) <= 65535):
+                    raise ValueError("Задайте MINECRAFT_SERVER: имя сервера и необязательный порт.")
+                self.next_join = time.monotonic() + 60
+                gateway.entry_point.ConnectToServer(server)
             self.attach(gateway.entry_point)
             address = gateway.jvm.java.net.InetAddress.getByName("127.0.0.1")
             gateway.java_gateway_server.resetCallbackClient(address, self.settings.minecraft_callback_port)
             gateway.entry_point.InitPythonCallback()
             if not gateway.entry_point.IsCallbackServerStarted():
                 raise ValueError("UnionClef не подтвердил обратное соединение Python.")
+            if self.shutdown.is_set():
+                raise ValueError("Подключение отменено при завершении приложения.")
         except Exception:
             self.detach()
             gateway.shutdown_callback_server()
@@ -110,13 +126,24 @@ class MinecraftService:
                     break
 
     def refresh(self):
-        entry = self.entry
-        if entry is None or not entry.inGame():
-            raise ValueError("Minecraft не находится в игровом мире.")
-        busy = bool(entry.hasActiveTask())
-        with self.lock:
+        with self.app.guard, self.lock:
+            entry = self.entry
+            if entry is None or not entry.inGame():
+                raise ValueError("Minecraft не находится в игровом мире.")
+            busy = bool(entry.hasActiveTask())
             self.busy = busy
-            if self.task:
+            if self.task and self.task["kind"] in ("collect", "deliver"):
+                advance(self, busy)
+            elif self.task and self.task["kind"] == "come":
+                if self.task.get("phase") == "stopping":
+                    if not busy:
+                        self.task.update(state="arrived", detail="Владелец в пределах трёх блоков, движение остановлено.")
+                elif owner_distance(entry, self.settings.minecraft_owner) <= 3:
+                    entry.stopPathing()
+                    self.task.update(phase="stopping", state="running")
+                elif busy:
+                    self.task["state"] = "running"
+            elif self.task:
                 if busy:
                     self.task["state"] = "running"
                 elif self.task["state"] == "running":
@@ -124,6 +151,10 @@ class MinecraftService:
                     self.task["state"] = "idle_unverified"
 
     def stop_task(self):
+        with self.app.guard, self.lock:
+            return self._stop_task()
+
+    def _stop_task(self):
         entry = self.entry
         if entry is None:
             return "Игровое управление пока не подключено."
@@ -160,12 +191,13 @@ class MinecraftService:
         if text in STOP:
             return self.app.stop()
         follow = text in ("за мной", "иди за мной", "следуй за мной")
+        come = text in ("ко мне", "подойди ко мне", "иди ко мне")
         collect = re.fullmatch(r"(?:принеси|добудь|собери)\s+(.+)", text)
-        if not follow and not collect:
+        if not follow and not come and not collect:
             return None
         if self.entry is None:
             return "Minecraft не подключён. Поручение в игру не отправлено."
-        if self.task and self.task.get("state") in ("submitted", "running", "unconfirmed"):
+        if self.task and self.task.get("state") not in TERMINAL:
             return "Сначала скажи «стоп», затем дай новое игровое поручение."
         count, item = 0, ""
         if collect:
@@ -183,12 +215,14 @@ class MinecraftService:
                 return "Мир Minecraft закрыт. Поручение не отправлено."
             if self.entry.hasActiveTask():
                 return "В Minecraft уже есть активная задача. Сначала скажи «стоп», затем дай новое поручение."
-            if follow:
+            if follow or come:
                 self.entry.ChatMessage(";followPlayer " + self.settings.minecraft_owner)
-                task = {"kind": "follow", "target": self.settings.minecraft_owner, "state": "submitted"}
+                task = {"kind": "come" if come else "follow", "target": self.settings.minecraft_owner, "state": "submitted"}
             else:
                 self.entry.ExecuteCommand(f"@get {item} {count}")
-                task = {"kind": "collect", "item": item, "count": count, "state": "submitted"}
+                task = {"kind": "deliver" if text.startswith("принеси") else "collect", "item": item,
+                        "count": count, "target": self.settings.minecraft_owner,
+                        "state": "submitted", "phase": "collect", "started_at": time.monotonic()}
             with self.lock:
                 self.task = task
             return "Поручение передано в UnionClef. Результат ещё не подтверждён."
@@ -213,18 +247,33 @@ class MinecraftService:
         owner = sender.casefold() == self.settings.minecraft_owner.casefold()
         content = self.strip_address(text)
         if owner and content.casefold().rstrip(".!?") in STOP:
-            self.app.stop()  # Priority path: no queue and no model request.
+            reply = self.app.stop()  # Priority path: no queue and no model request.
+            self.control_reply(reply)
+            return
+        if owner and content.casefold() in ("/проснись", "/wake"):
+            self.control_reply(self.app.runtime.wake())
+            return
+        if self.app.runtime.sleeping():
             return
         if not addressed:
             return
         try:
-            self.messages.put_nowait((sender, content, owner, revision, self.epoch))
+            self.messages.put_nowait((sender, content, owner, revision, self.epoch, message.get("source", "chat")))
         except queue.Full:
             pass
 
+    def control_reply(self, reply):
+        with self.app.guard, self.lock:
+            if self.entry is not None and not self.shutdown.is_set():
+                try:
+                    self.entry.ChatMessage(chat_text(reply))
+                except Exception:
+                    pass  # A failed chat acknowledgement must not undo the stop itself.
+
     def work_once(self):
         try:
-            sender, text, owner, revision, epoch = self.messages.get_nowait()
+            started = time.monotonic()
+            sender, text, owner, revision, epoch, source = self.messages.get_nowait()
         except queue.Empty:
             return False
         token = text.partition(" ")[0].casefold()
@@ -248,10 +297,14 @@ class MinecraftService:
             if result is None:
                 result = self.app.reply(text, actor="minecraft:" + sender.casefold(), expected_revision=revision)["reply"]
             reply = chat_text(result)
+            if source == "voice":
+                self.app.voice.metrics["reply_ms"] = round((time.monotonic() - started) * 1000)
             with self.app.guard, self.lock:
                 if (reply and self.entry is not None and epoch == self.epoch and not self.shutdown.is_set()
                         and revision == self.app.store.get("response_revision", 0)):
                     self.entry.ChatMessage(reply)
+                    if source == "voice":
+                        self.app.voice.enqueue(reply, revision, epoch)
             return True
         except (Cancelled, ModelError, ValueError):
             return True
@@ -275,8 +328,8 @@ class MinecraftService:
         self.thread.start()
 
     def run(self):
-        worker = threading.Thread(target=self.worker, daemon=True, name="joker-minecraft-chat")
-        worker.start()
+        self.worker_thread = threading.Thread(target=self.worker, daemon=True, name="joker-minecraft-chat")
+        self.worker_thread.start()
         while not self.shutdown.is_set():
             try:
                 if self.entry is None:
@@ -311,6 +364,8 @@ class MinecraftService:
 
     def close(self):
         self.shutdown.set()
+        if self.thread and self.thread is not threading.current_thread():
+            self.thread.join(timeout=4)
         self.disconnect()
 
 
@@ -335,7 +390,8 @@ class GameCallbacks:
     def onDamage(self, amount): pass
     def onDamageConfirmed(self, damaged, attacker, amount): pass
     def onCaptchaSolveRequest(self, image): pass
-    def onVoiceFeed(self, player, audio): pass
+    def onVoiceFeed(self, player, audio):
+        self.service.app.voice.feed(str(player), bytes(audio))
     def agentCommandRequest(self, command): return "not supported"
 
     class Java:

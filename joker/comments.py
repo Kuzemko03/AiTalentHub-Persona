@@ -146,6 +146,8 @@ class CommentService:
                                               (after, update_id, before)).rowcount)
 
     def work_once(self, api):
+        if self.app.runtime.sleeping():
+            return
         if not self.store.get("comments_enabled", False):
             return
         binding = self.store.get("comments_binding", {})
