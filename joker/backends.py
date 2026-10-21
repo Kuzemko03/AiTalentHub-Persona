@@ -180,7 +180,7 @@ class ApiBackend:
         body = {"model": self.settings.api_model,
                 "messages": [{"role": "system", "content": system + "\nResponse JSON schema:\n"
                     + json.dumps(SCHEMA if schema is None else schema, ensure_ascii=False)}, *messages],
-                "response_format": {"type": "json_object"}, "max_tokens": 2000 if schema is not None else 400}
+                "response_format": {"type": "json_object"}, "max_tokens": 2000 if schema is not None else 1600}
         request = urllib.request.Request(self.settings.api_url.rstrip("/") + "/chat/completions",
                                          data=json.dumps(body).encode(), headers={
                                              "Content-Type": "application/json",

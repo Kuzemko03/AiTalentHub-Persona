@@ -18,6 +18,8 @@ HELP = ("Напиши «Джокер, стань сантехником» или
         "Minecraft подключается отдельно через UnionClef. /игра — состояние; за мной — следовать; "
         "принеси 16 дубовых брёвен — запросить добычу; стоп — отменить ответ и игровую задачу.\n"
         "/цель текст — цель самостоятельной работы; /автономность вкл или выкл; /план — состояние.\n"
+        "/поручения — список шагов; /поручения пуск, пауза или отмена — управление. "
+        "Попроси составить несколько поручений обычными словами, затем проверь список в панели.\n"
         "/сон [минуты] — спать; /проснись — продолжить; /голос вкл или выкл; "
         "/голос тембр ID — сохранить голос маски.\n"
         "/канал — подключение канала\n/пост — посмотреть черновик\n/пост новый тема — написать черновик без публикации\n"
@@ -57,6 +59,8 @@ class App:
         self.voice = Voice(self)
         from .memory import Memory
         self.memory = Memory(self)
+        from .errands import Errands
+        self.errands = Errands(self)
 
     @property
     def active(self):
@@ -77,6 +81,7 @@ class App:
     def stop(self):
         with self.guard:
             self.runtime.pause()
+            self.errands.pause()
             return self.cancel_reply() + " " + self.minecraft.stop_task()
 
     def switch(self, mask_id):
@@ -105,6 +110,7 @@ class App:
                 "memory": self.store.facts(actor), "minecraft": self.minecraft.status()["detail"],
                 "game": self.minecraft.status(),
                 "runtime": self.runtime.status(), "voice": self.voice.status(),
+                "errands": self.errands.context(actor) if self.workplace.is_owner(actor) else None,
                 "generating": bool(self.active_cancel and not self.active_cancel.is_set()),
                 "reasoning": self.settings.reasoning if self.settings.backend == "codex" else None,
                 "telegram": dict(self.telegram_status),
@@ -137,6 +143,8 @@ class App:
                 raise Cancelled("Запрос отменён до выполнения команды.")
             self.runtime.interrupt()
         control = self.runtime.command(text)
+        if control is None:
+            control = self.errands.command(text, actor)
         if control is None:
             control = self.voice.command(text)
         if control is None:

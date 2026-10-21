@@ -8,7 +8,7 @@ from .tool_specs import STATE, TOOLS, validate
 
 
 GUIDES = {"minecraft": "Game actions and verification", "memory": "Memory and visibility",
-          "voice": "Voice pipeline and speaker identity"}
+          "voice": "Voice pipeline and speaker identity", "errands": "Ordered errands, review and stopping"}
 
 
 class Workplace:
@@ -30,14 +30,15 @@ class Workplace:
                 "guides": GUIDES, "resources": self.app.minecraft.resources,
                 "personas": [{"id": m["id"], "name": m["display_name"], "role": m["role"]}
                              for m in self.app.masks.values()],
-                "owner_controls": permitted, **self.app.experience.context(actor)}
+                "owner_controls": permitted, "errands": self.app.errands.context(actor) if permitted else None,
+                **self.app.experience.context(actor)}
 
     def check(self, cancel, revision, epoch):
         if (cancel.is_set() or revision != self.app.store.get("response_revision", 0)
                 or epoch != self.app.minecraft.epoch):
             raise Cancelled("Решение отменено до выполнения.")
 
-    def execute(self, name, arguments, *, actor, owner, cancel, revision, epoch, turn_id, text=""):
+    def execute(self, name, arguments, *, actor, owner, cancel, revision, epoch, turn_id, text="", game_task_id=None):
         spec = TOOLS.get(name)
         if spec is None:
             raise ModelError("Модель запросила неизвестный инструмент.")
@@ -56,7 +57,8 @@ class Workplace:
                 if not claimed:
                     return {"ok": False, "code": "mutation_not_repeated", "previous": previous,
                             "detail": "Действие этого обращения уже было начато. Повтор запрещён; проверь результат."}
-            self.app.experience.record(actor, "workplace", "tool.request", {"name": name, "arguments": arguments}, turn_id)
+            event_actor = "owner" if name.startswith("queue.") else actor
+            self.app.experience.record(event_actor, "workplace", "tool.request", {"name": name, "arguments": arguments}, turn_id)
         # The profile model must remain interruptible by Stop.
         if name == "role.create":
             result = self.app.roles.adopt(arguments["description"], expected_revision=revision, held_cancel=cancel,
@@ -64,7 +66,7 @@ class Workplace:
         else:
             with self.app.guard:
                 self.check(cancel, revision, epoch)
-                result = self.dispatch(name, arguments, actor)
+                result = self.dispatch(name, arguments, actor, game_task_id=game_task_id)
         if spec[2] and name != "game.stop":
             self.app.experience.finish_effect(turn_id, result)
         recorded = result
@@ -72,17 +74,27 @@ class Workplace:
             recorded = {"facts_count": len(result["facts"]), "notes_count": len(result["notes"])}
         elif name == "instructions.read":
             recorded = {"guide": arguments["guide"], "ok": "text" in result}
-        self.app.experience.record(actor, "workplace", "tool.result", {"name": name, "result": recorded}, turn_id)
+        if name.startswith("queue.") and actor != "owner" and "steps" in result:
+            result = self.app.errands.context(actor)
+        self.app.experience.record(event_actor, "workplace", "tool.result", {"name": name, "result": recorded}, turn_id)
         return result
 
-    def dispatch(self, name, arguments, actor):
+    def dispatch(self, name, arguments, actor, *, game_task_id=None):
         if name == "game.observe":
             return self.app.minecraft.observe()
         if name == "game.stop":
             reply = self.app.stop()
             return {"reply": reply, "_revision": self.app.store.get("response_revision", 0), "_mask": self.app.active}
         if name.startswith("game."):
-            return self.app.minecraft.execute(name.removeprefix("game."), **arguments)
+            return self.app.minecraft.execute(name.removeprefix("game."), **arguments, task_id=game_task_id)
+        if name == "queue.create":
+            return self.app.errands.create(**arguments)
+        if name == "queue.control":
+            result = self.app.errands.control(arguments["id"], arguments["version"], arguments["action"])
+            if arguments["action"] in ("pause", "cancel"):
+                return {"reply": result["detail"], "_revision": self.app.store.get("response_revision", 0),
+                        "_mask": self.app.active}
+            return result
         if name == "memory.search":
             return self.app.memory.recall(actor, arguments["query"])
         if name == "instructions.read":
@@ -153,7 +165,9 @@ class Workplace:
                 if signature in seen and TOOLS.get(tool["name"], (None, None, False))[2]:
                     raise ModelError("Повтор инструмента в одном решении остановлен.")
                 seen.add(signature)
-                if tool["name"] not in ("game.stop", "role.select", "role.create"):
+                terminal = (tool["name"] in ("game.stop", "role.select", "role.create")
+                    or tool["name"] == "queue.control" and tool["arguments"].get("action") in ("pause", "cancel"))
+                if not terminal:
                     # Ensure a budgeted follow-up exists BEFORE a game side effect.
                     with self.app.guard:
                         self.check(cancel, revision, epoch)

@@ -9,6 +9,7 @@ from .backends import Cancelled, ModelError
 from .telegram_bot import TelegramError
 from .roles import portrait_path
 from .memory import MemoryConflict
+from .errands import QueueConflict
 
 
 class BoundedServer(ThreadingHTTPServer):
@@ -196,6 +197,12 @@ def make_server(app, port=None):
                     else:
                         raise ValueError("Неизвестное действие.")
                     self.respond(reply)
+                elif self.path == "/api/errands":
+                    if value.get("action") == "confirm":
+                        result = app.errands.confirm(value["id"], value["version"], value["step_id"])
+                    else:
+                        result = app.errands.control(value["id"], value["version"], value["action"])
+                    self.respond({"reply": result["detail"], "errands": result})
                 elif self.path == "/api/voice":
                     action = value.get("action")
                     if action not in ("on", "off"):
@@ -250,7 +257,7 @@ def make_server(app, port=None):
                     self.respond({"error": "Не найдено"}, 404)
             except Cancelled:
                 self.respond({"cancelled": True, "reply": "Предыдущий ответ отменён."})
-            except MemoryConflict as exc:
+            except (MemoryConflict, QueueConflict) as exc:
                 self.respond({"error": str(exc)}, 409)
             except ModelError as exc:
                 self.respond({"error": str(exc)}, 503)

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from .tool_specs import STATE, validate
 from .backends import Cancelled, ModelError
+from .errands import DECISION as ERRAND_DECISION
 
 PLAN_SCHEMA = {"type": "object", "properties": {
     "state": {"anyOf": [{"type": "null"}, STATE]},
@@ -138,7 +139,13 @@ class Runtime:
             if quiet:
                 self.sleep(quiet, scheduled=True)
                 return
-            if not self.state["enabled"] or not self.state["goal"] or now < self.next_tick:
+            queue_mode = self.app.errands.ready()
+            if self.app.errands.owns_game():
+                if not queue_mode:
+                    return
+            elif not self.state["enabled"] or not self.state["goal"]:
+                return
+            if now < self.next_tick:
                 return
             self.next_tick = now + max(15, self.app.settings.runtime_interval)
             game = self.app.minecraft.status()
@@ -158,10 +165,13 @@ class Runtime:
                 budget = {"day": day, "used": 0}
             if budget["used"] >= self.app.settings.runtime_daily_requests:
                 self.state["detail"] = "Дневной бюджет самостоятельных решений исчерпан."
+                if queue_mode and self.app.errands.state["detail"] != self.state["detail"]:
+                    self.app.errands.save(self.state["detail"])
                 return
             revision = self.app.store.get("response_revision", 0)
             epoch = self.app.minecraft.epoch
             goal = self.state["goal"]
+            queue = self.app.errands.status() if queue_mode else None
         # Yield the single model lane to incoming chat. Never wait behind a dialogue.
         if not self.app.generation.acquire(blocking=False):
             return
@@ -169,8 +179,11 @@ class Runtime:
         call_id = None
         try:
             with self.app.guard:
-                if not self.state["enabled"] or revision != self.app.store.get("response_revision", 0):
+                if (revision != self.app.store.get("response_revision", 0)
+                        or not (self.app.errands.ready() if queue_mode else self.state["enabled"])):
                     return
+                if queue_mode:
+                    self.app.errands.check_version(queue["id"], queue["version"])
                 call_id = self.app.store.reserve_call(self.app.settings.daily_requests)
                 budget["used"] += 1
                 self.app.store.set("runtime_budget", budget)
@@ -178,6 +191,11 @@ class Runtime:
                 self.planning = True
                 mask = dict(self.app.masks[self.app.active])
                 plan = self.app.store.get("runtime_plan", [])
+            if queue_mode:
+                self.decide_errand(queue, mask, cancel, revision, epoch, now)
+                self.app.store.finish_call(call_id, {"status": "done", "purpose": "errands"})
+                call_id = None
+                return
             system = "\n\n".join((self.app.home / file).read_text(encoding="utf-8")
                                    for file in ("PERSONA.md", "PLANNING.md"))
             result = self.app.backend.generate(system, [{"role": "user", "content": json.dumps(
@@ -224,17 +242,43 @@ class Runtime:
                 self.save()
             self.app.store.finish_call(call_id, {"status": "done", "purpose": "runtime"})
             call_id = None
+        except Cancelled:
+            pass
         except (ModelError, ValueError):
             with self.app.guard:
                 self.state["detail"] = "Самостоятельное решение не выполнено. Повтор позже."
+                if (queue_mode and self.app.errands.ready() and self.app.errands.state["id"] == queue["id"]
+                        and self.app.errands.state["version"] == queue["version"]):
+                    self.app.errands.save("Решение модели не выполнено. Шаг не отправлен; новое решение в пределах бюджета.")
         finally:
             if call_id is not None:
-                self.app.store.finish_call(call_id, {"status": "failed", "purpose": "runtime"})
+                self.app.store.finish_call(call_id, {"status": "failed", "purpose": "errands" if queue_mode else "runtime"})
             with self.app.guard:
                 self.planning = False
                 if self.app.active_cancel is cancel:
                     self.app.active_cancel = None
             self.app.generation.release()
+
+    def decide_errand(self, queue, mask, cancel, revision, epoch, now):
+        system = "\n\n".join((self.app.home / file).read_text(encoding="utf-8")
+                               for file in ("PERSONA.md", "ERRANDS.md"))
+        result = self.app.backend.generate(system, [{"role": "user", "content": json.dumps({
+            "queue": queue, "mask": mask, "game": self.app.minecraft.observe(),
+            "experience": self.app.experience.context("world:minecraft")}, ensure_ascii=False)}],
+            cancel, schema=ERRAND_DECISION)
+        if not isinstance(result, dict):
+            raise ValueError("Модель вернула неверное решение по поручениям.")
+        if set(result) - set(ERRAND_DECISION["properties"]) - {"usage", "latency", "backend", "model"}:
+            raise ValueError("В решении по поручениям есть неизвестные поля.")
+        result = {key: result.get(key) for key in ERRAND_DECISION["properties"]}
+        validate(result, ERRAND_DECISION)
+        with self.app.guard:
+            self.app.workplace.check(cancel, revision, epoch)
+            if self.shutdown.is_set() or self.sleeping():
+                raise Cancelled("Решение по поручению отменено.")
+            self.app.errands.apply(result, queue, cancel=cancel, revision=revision, epoch=epoch)
+            if result["action"] == "wait":
+                self.next_tick = now + result["seconds"]
 
     def start(self):
         self.quiet_remaining(time.time())  # Validate before creating a worker.

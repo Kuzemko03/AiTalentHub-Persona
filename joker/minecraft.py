@@ -6,6 +6,7 @@ import re
 import socket
 import threading
 import time
+import uuid
 
 from .backends import Cancelled, ModelError
 from .game_tasks import advance, owner_distance, inventory
@@ -14,7 +15,7 @@ NICK = re.compile(r"[A-Za-z0-9_]{3,16}\Z")
 STOP = {"стоп", "/stop", "/стоп"}
 CONTROL = {"/mask", "/маска", "/reset", "/сброс", "/roles", "/роли", "/status", "/статус",
            "/сон", "/sleep", "/проснись", "/wake", "/заметка", "/note", "/заметки", "/notes",
-           "/найди", "/find", "/забудь", "/forget", "/связь", "/link"}
+           "/найди", "/find", "/забудь", "/forget", "/связь", "/link", "/поручения", "/queue"}
 
 
 
@@ -68,7 +69,7 @@ class MinecraftService:
         with self.lock:
             return {"connected": self.entry is not None, "detail": self.detail,
                     "busy": self.busy, "task": dict(self.task) if self.task else None,
-                    "queued": self.messages.qsize()}
+                    "queued": self.messages.qsize(), "resources": dict(self.resources)}
 
     def connect(self):
         if not NICK.fullmatch(self.settings.minecraft_owner) or not NICK.fullmatch(self.settings.minecraft_bot):
@@ -123,7 +124,9 @@ class MinecraftService:
             self.detail = "подключён через UnionClef"
 
     def detach(self):
-        with self.lock:
+        with self.app.guard, self.lock:
+            if hasattr(self.app, "errands"):
+                self.app.errands.pause()
             self.entry = None
             self.epoch += 1
             self.busy = False
@@ -145,9 +148,17 @@ class MinecraftService:
             if self.task and self.task["kind"] in ("collect", "deliver"):
                 advance(self, busy)
             elif self.task and self.task["kind"] == "come":
-                if self.task.get("phase") == "stopping":
+                if self.task.get("state") in ("failed", "unconfirmed", "arrived"):
+                    pass
+                elif time.monotonic() - self.task.get("started_at", time.monotonic()) > 900:
+                    entry.stopPathing()
+                    self.task.update(state="failed", detail="Истекли 15 минут ожидания подхода. Проверь игру.")
+                elif self.task.get("phase") == "stopping":
                     if not busy:
-                        self.task.update(state="arrived", detail="Владелец в пределах трёх блоков, движение остановлено.")
+                        if owner_distance(entry, self.settings.minecraft_owner) <= 3:
+                            self.task.update(state="arrived", detail="Владелец в пределах трёх блоков, движение остановлено.")
+                        else:
+                            self.task.update(state="unconfirmed", detail="Владелец отошёл до завершения остановки. Проверь подход.")
                 elif owner_distance(entry, self.settings.minecraft_owner) <= 3:
                     entry.stopPathing()
                     self.task.update(phase="stopping", state="running")
@@ -229,8 +240,10 @@ class MinecraftService:
             self.app.experience.record("world:minecraft", "minecraft", "task.observed", task)
         if (not task or task.get("state") in ("collected", "arrived")) and not self.busy:
             self.app.store.set("pending_game_action", None)
+        if hasattr(self.app, "errands"):
+            self.app.errands.observe(task, self.busy)
 
-    def execute(self, action, item=None, count=None):
+    def execute(self, action, item=None, count=None, *, task_id=None):
         """Typed bridge operation. No user text, aliases or behavior selection."""
         if action not in ("follow", "come", "collect", "deliver"):
             raise ValueError("Неизвестный игровой инструмент.")
@@ -238,6 +251,11 @@ class MinecraftService:
                 or type(count) is not int or not 1 <= count <= 256):
             raise ValueError("Нужен ресурс из каталога и количество от 1 до 256.")
         with self.app.guard, self.lock:
+            queue = getattr(self.app, "errands", None)
+            if queue and queue.owns_game() and (not task_id or task_id != queue.current()["task_id"]
+                    or queue.current()["status"] != "dispatching"):
+                return {"accepted": False, "completed": False,
+                        "detail": "Сначала приостанови и отмени список поручений. Отдельное действие не отправлено."}
             if self.entry is None:
                 return {"accepted": False, "completed": False, "detail": "Minecraft не подключён. Поручение не отправлено."}
             if self.task and self.task.get("state") not in ("collected", "arrived"):
@@ -247,7 +265,10 @@ class MinecraftService:
                 if not self.entry.inGame() or self.entry.hasActiveTask():
                     return {"accepted": False, "completed": False,
                             "detail": "Мир закрыт или есть активная задача. Проверь игру и нажми «стоп»; новое поручение не отправлено."}
-                task = {"kind": action, "target": self.settings.minecraft_owner, "state": "submitted"}
+                task = {"id": task_id or uuid.uuid4().hex, "kind": action,
+                        "target": self.settings.minecraft_owner, "state": "submitted"}
+                if action == "come":
+                    task["started_at"] = time.monotonic()
                 if action in ("collect", "deliver"):
                     task.update(item=item, count=count, phase="collect", started_at=time.monotonic())
                 # Write intent before any bridge side effect; never replay it after restart.
@@ -261,7 +282,7 @@ class MinecraftService:
                 return {"accepted": True, "completed": False, "task": dict(task),
                         "detail": "Поручение передано в UnionClef. Результат ещё не подтверждён."}
             except Exception:
-                self.task = {"kind": "unknown", "state": "unconfirmed"}
+                self.task = {"id": task_id or (self.task or {}).get("id", ""), "kind": "unknown", "state": "unconfirmed"}
                 self.trace_task()
                 return {"accepted": None, "completed": False, "task": dict(self.task),
                         "detail": "Связь потеряна; приём задачи неизвестен. Проверь игру и останови задачу."}
