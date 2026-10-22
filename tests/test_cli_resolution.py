@@ -30,13 +30,13 @@ class CLIResolutionTests(Fixture):
         self.executable_file("old", 1000)
         newest = self.executable_file("new", 2000)
         self.settings.codex_bin = str(self.managed / "removed" / "codex.exe")
-        self.assertEqual(Path(CodexBackend(self.settings).executable()), newest)
+        self.assertTrue(Path(CodexBackend(self.settings).executable()).samefile(newest))
 
     def test_existing_explicit_binary_remains_selected(self):
         selected = self.executable_file("old", 1000)
         self.executable_file("new", 2000)
         self.settings.codex_bin = str(selected)
-        self.assertEqual(Path(CodexBackend(self.settings).executable()), selected)
+        self.assertTrue(Path(CodexBackend(self.settings).executable()).samefile(selected))
 
     def test_missing_custom_path_is_not_replaced_by_another_installation(self):
         self.executable_file("new", 2000)
@@ -51,7 +51,7 @@ class CLIResolutionTests(Fixture):
         self.which.return_value = "fixture-path-cli"
         self.assertEqual(CodexBackend(self.settings).executable(), "fixture-path-cli")
         self.which.return_value = None
-        self.assertEqual(Path(CodexBackend(self.settings).executable()), newest)
+        self.assertTrue(Path(CodexBackend(self.settings).executable()).samefile(newest))
 
     def test_missing_cli_has_actionable_error(self):
         with self.assertRaises(ModelError):
