@@ -1,0 +1,20 @@
+{
+  "at": "2026-10-22T09:51:10.172263+00:00",
+  "passed": true,
+  "provenance": "Synthetic input audio, real configured text model, local Whisper and Piper; temporary empty history.",
+  "microphone_tested": false,
+  "minecraft_tested": false,
+  "playback_tested": false,
+  "actor": "call:shared",
+  "recognized": "Джокер, привет. Расскажи, что ты умеешь.",
+  "reply": "Привет! Я могу поддержать разговор, помочь разобраться в вопросе или придумать решение. А если захочешь — поболтаем про Minecraft, только сейчас игра не подключена.",
+  "metrics": {
+    "intake_to_stt_ms": 16,
+    "stt_ms": 4250,
+    "reply_ms": 7781,
+    "tts_ms": 3390,
+    "tts_audio_seconds": 10.04
+  },
+  "text_model": "gpt-6-luna",
+  "reply_audio_seconds": 10.04
+}

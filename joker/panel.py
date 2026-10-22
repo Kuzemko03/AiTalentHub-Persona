@@ -12,6 +12,7 @@ from .memory import MemoryConflict
 from .errands import QueueConflict
 from .audio_routes import RouteConflict
 from .readiness import report as readiness_report
+from .stt import MAX_WAV
 
 
 class BoundedServer(ThreadingHTTPServer):
@@ -163,6 +164,11 @@ def make_server(app, port=None):
                 if self.headers.get("Transfer-Encoding"):
                     raise ValueError("Неподдерживаемый формат передачи.")
                 length = int(self.headers.get("Content-Length", "0"))
+                if self.path == "/api/stt/preview":
+                    if not 44 <= length <= MAX_WAV or self.headers.get("Content-Type") not in ("audio/wav", "audio/x-wav"):
+                        raise ValueError("Нужен WAV PCM16 mono до 10 секунд и 1 МБ.")
+                    result = app.voice.transcribe_preview(self.rfile.read(length), self.headers.get("X-Joker-Mask"))
+                    return self.respond(result)
                 if length < 1 or length > 16000:
                     raise ValueError("Неверный размер запроса.")
                 value = json.loads(self.rfile.read(length))

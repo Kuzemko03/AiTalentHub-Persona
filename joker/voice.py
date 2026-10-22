@@ -1,4 +1,4 @@
-"""Opt-in voice: bounded PCM intake -> HTTP STT -> game event -> HTTP TTS -> device.
+"""Opt-in voice: bounded PCM intake -> STT -> persona event -> TTS -> selected device.
 
 UnionClef supplies 48 kHz mono PCM16LE. Optional call input and output must
 be explicitly selected devices (two virtual cables for a group call).
@@ -21,6 +21,7 @@ from typing import NamedTuple
 from .backends import Cancelled, ModelError
 from .audio_routes import AudioRoutes
 from .tts import MAX_TEXT, PiperTTS, installed, pcm_wav, speech_text
+from .stt import WhisperSTT, audio_wav, status as stt_status
 
 RATE = 48000
 MAX_PCM = RATE * 2 * 10
@@ -81,9 +82,13 @@ class AudioHTTP:
     def __init__(self, settings):
         self.settings = settings
         self.local = PiperTTS(settings)
+        self.recognizer = WhisperSTT(settings)
 
     def close(self):
-        self.local.close()
+        try:
+            self.local.close()
+        finally:
+            self.recognizer.close()
 
     def request(self, url, key, body, content_type):
         parsed = urllib.parse.urlsplit(url)
@@ -107,13 +112,21 @@ class AudioHTTP:
         except (OSError, ValueError, urllib.error.URLError):
             raise ModelError("Аудиосервис не подтвердил запрос. Проверь настройки и соединение.") from None
 
-    def transcribe(self, pcm, cancel=None):
+    def transcribe(self, pcm, cancel=None, vocabulary=""):
+        return self.transcribe_wav(wav_bytes(pcm), cancel, vocabulary)
+
+    def transcribe_wav(self, raw, cancel=None, vocabulary=""):
         if cancel is not None and cancel.is_set():
             raise Cancelled("Распознавание отменено.")
+        raw, _ = audio_wav(raw)
+        if self.settings.stt_backend == "whisper":
+            return self.recognizer.transcribe_wav(raw, cancel, vocabulary)
+        if self.settings.stt_backend != "http":
+            raise ValueError("STT_BACKEND должен быть http или whisper.")
         boundary = "joker" + uuid.uuid4().hex
         body = (f'--{boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n{self.settings.stt_model}\r\n'
                 f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="speech.wav"\r\n'
-                'Content-Type: audio/wav\r\n\r\n').encode() + wav_bytes(pcm) + f"\r\n--{boundary}--\r\n".encode()
+                'Content-Type: audio/wav\r\n\r\n').encode() + raw + f"\r\n--{boundary}--\r\n".encode()
         raw = self.request(self.settings.stt_url, self.settings.stt_key, body,
                            "multipart/form-data; boundary=" + boundary)
         if cancel is not None and cancel.is_set():
@@ -149,6 +162,7 @@ class Voice:
         self.enabled = False
         self.lock = threading.RLock()
         self.buffers = {}
+        self.preroll = {}
         self.audio = queue.Queue(maxsize=4)
         self.speech = queue.Queue(maxsize=4)
         self.calls = queue.Queue(maxsize=4)
@@ -165,9 +179,14 @@ class Voice:
         self.mode = app.store.get("voice_mode", app.settings.voice_mode)
         self.preview_lock = threading.Lock()
         self.playback_lock = threading.Lock()
+        self.stt_preview_lock = threading.Lock()
 
     def selected_voice(self):
         return self.voices.get(self.app.active, self.app.settings.tts_voice)
+
+    def vocabulary(self):
+        names = (self.app.masks["joker"]["display_name"], self.app.masks[self.app.active]["display_name"])
+        return ", ".join(dict.fromkeys(name for name in names if 0 < len(name) <= 80))
 
     def tts_status(self):
         s = self.app.settings
@@ -183,11 +202,12 @@ class Voice:
 
     def status(self):
         with self.lock:
+            recognition = stt_status(self.app.settings)
             return {"enabled": self.enabled, "detail": self.detail, "playing": self.playing,
                     "queued": self.speech.qsize(), "metrics": dict(self.metrics),
                     "role_voices": dict(self.voices), "mode": self.mode, "tts": self.tts_status(),
                     "output_device_configured": self.routes.configured("output"),
-                    "stt_configured": bool(self.app.settings.stt_url and self.app.settings.stt_model)}
+                    "stt": recognition, "stt_configured": recognition["ready"]}
 
     def valid(self, revision, epoch):
         return (self.enabled and not self.shutdown.is_set() and not self.app.runtime.sleeping()
@@ -220,12 +240,18 @@ class Voice:
                 return
             key = (source, player)
             buf = self.buffers.get(key)
-            if rms < 250:
-                return  # Silence is finalized by flush, not sent to a paid service.
+            if rms < 250 and buf is None:
+                if key not in self.preroll and len(self.preroll) >= 4:
+                    self.preroll.pop(next(iter(self.preroll)))
+                previous, at = self.preroll.get(key, (b"", 0))
+                self.preroll[key] = (((previous if now - at <= .3 else b"") + pcm)[-19200:], now)
+                return  # No utterance starts from silence; preserve pauses once speech has started.
             if buf is None:
                 if len(self.buffers) >= 4:
                     return
-                buf = {"pcm": bytearray(), "at": now, "last": now,
+                prefix, at = self.preroll.pop(key, (b"", 0))
+                prefix = prefix if now - at <= .3 else b""
+                buf = {"pcm": bytearray(prefix), "at": now - len(prefix) / RATE / 2, "last": now,
                        "ticket": self.ticket(self.app.store.get("response_revision", 0),
                                              None if source == "call" else self.app.minecraft.epoch)}
                 self.buffers[key] = buf
@@ -234,7 +260,8 @@ class Voice:
                 buf["overflow"] = True
             elif not buf.get("overflow"):
                 buf["pcm"].extend(pcm)
-            buf["last"] = now
+            if rms >= 250:
+                buf["last"] = now
 
     def flush(self, now=None):
         now = time.monotonic() if now is None else now
@@ -269,14 +296,15 @@ class Voice:
             quota = self.app.store.get("voice_budget", {"day": day, "used": 0})
             if quota["day"] != day:
                 quota = {"day": day, "used": 0}
-            if quota["used"] >= 100 or time.monotonic() - self.last_stt < 3:
+            cooldown = 0 if self.app.settings.stt_backend == "whisper" else 3
+            if quota["used"] >= self.app.settings.stt_daily_requests or time.monotonic() - self.last_stt < cooldown:
                 return True
             quota["used"] += 1
             self.app.store.set("voice_budget", quota)
             self.last_stt = time.monotonic()
         started = time.monotonic()
         try:
-            text = self.provider.transcribe(pcm, ticket.cancel)
+            text = self.provider.transcribe(pcm, ticket.cancel, self.vocabulary())
         except ModelError:
             if not self.current(ticket):
                 return True
@@ -431,6 +459,41 @@ class Voice:
         finally:
             self.preview_lock.release()
 
+    def transcribe_preview(self, raw, mask):
+        raw, seconds = audio_wav(raw)
+        if not self.stt_preview_lock.acquire(blocking=False):
+            raise ModelError("Проверка распознавания уже выполняется.")
+        try:
+            with self.app.guard:
+                if mask != self.app.active:
+                    raise Cancelled("Роль изменилась; повтори проверку распознавания.")
+                if not stt_status(self.app.settings)["ready"]:
+                    raise ModelError("Сначала установи или настрой распознавание речи.")
+                cancel = self.cancel
+                revision = self.app.store.get("response_revision", 0)
+                self.reserve_stt(cancel)
+            started = time.monotonic()
+            text = self.provider.transcribe_wav(raw, cancel, self.vocabulary())
+            if cancel.is_set() or revision != self.app.store.get("response_revision", 0):
+                raise Cancelled("Проверка распознавания отменена.")
+            return {"text": text, "seconds": round(seconds, 2),
+                    "milliseconds": round((time.monotonic() - started) * 1000)}
+        finally:
+            self.stt_preview_lock.release()
+
+    def reserve_stt(self, cancel):
+        with self.app.guard:
+            if cancel.is_set():
+                raise Cancelled("Распознавание отменено до резервирования бюджета.")
+            day = self.app.store.now()[:10]
+            quota = self.app.store.get("voice_budget", {"day": day, "used": 0})
+            if quota["day"] != day:
+                quota = {"day": day, "used": 0}
+            if quota["used"] >= self.app.settings.stt_daily_requests:
+                raise ModelError("Дневной лимит распознавания исчерпан: " + str(self.app.settings.stt_daily_requests) + " записей.")
+            quota["used"] += 1
+            self.app.store.set("voice_budget", quota)
+
     def set_voice(self, voice, mask=None):
         if not isinstance(voice, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}", voice):
             raise ValueError("Укажи ID голоса из своего TTS-сервиса или установленной модели Piper.")
@@ -448,6 +511,7 @@ class Voice:
             self.cancel.set()
             self.cancel = threading.Event()
             self.buffers.clear()
+            self.preroll.clear()
             for pending in (self.audio, self.speech, self.calls):
                 while True:
                     try: pending.get_nowait()
@@ -482,8 +546,8 @@ class Voice:
         s = self.app.settings
         if not self.tts_status()["ready"] or not self.routes.configured("output"):
             raise ModelError("Настрой TTS, выбранный голос и выход звука в панели. Пример можно создать без аудиоустройства.")
-        if mode == "conversation" and not all((s.stt_url, s.stt_model)):
-            raise ValueError("Для разговора настрой STT_URL/MODEL; для одной озвучки выбери режим tts.")
+        if mode == "conversation" and not stt_status(s)["ready"]:
+            raise ValueError("Для разговора настрой локальный Whisper или HTTP STT; для одной озвучки выбери режим tts.")
         import importlib.util
         if importlib.util.find_spec("sounddevice") is None:
             raise ValueError('Установи голос: pip install -e ".[voice]"')

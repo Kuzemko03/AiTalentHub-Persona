@@ -52,6 +52,11 @@ class Settings:
     stt_url: str = ""
     stt_model: str = ""
     stt_key: str = ""
+    stt_backend: str = "http"
+    stt_models_dir: str = ""
+    stt_language: str = "ru"
+    stt_threads: int = 4
+    stt_daily_requests: int = 100
     tts_url: str = ""
     tts_model: str = ""
     tts_key: str = ""
@@ -92,6 +97,9 @@ class Settings:
                    voice_guests=values.get("VOICE_GUESTS", "0") == "1",
                    stt_url=values.get("STT_URL", ""), stt_model=values.get("STT_MODEL", ""),
                    stt_key=values.get("STT_API_KEY", ""),
+                   stt_backend=values.get("STT_BACKEND", "http"), stt_models_dir=values.get("STT_MODELS_DIR", ""),
+                   stt_language=values.get("STT_LANGUAGE", "ru"), stt_threads=int(values.get("STT_THREADS", "4")),
+                   stt_daily_requests=int(values.get("STT_DAILY_REQUESTS", "100")),
                    tts_url=values.get("TTS_URL", ""), tts_model=values.get("TTS_MODEL", ""),
                    tts_key=values.get("TTS_API_KEY", ""), tts_voice=values.get("TTS_VOICE", ""),
                    tts_backend=values.get("TTS_BACKEND", "http"), tts_voices_dir=values.get("TTS_VOICES_DIR", ""),

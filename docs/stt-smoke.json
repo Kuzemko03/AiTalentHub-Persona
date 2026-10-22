@@ -1,0 +1,71 @@
+{
+  "at": "2026-10-22T09:43:51.027239+00:00",
+  "model": "small",
+  "language": "ru",
+  "device": "cpu",
+  "compute_type": "int8",
+  "threads": 4,
+  "packages": {
+    "faster-whisper": "1.2.1",
+    "ctranslate2": "4.8.3",
+    "av": "16.0.1",
+    "piper-tts": "1.8.0"
+  },
+  "audio_source": "synthetic Piper speech and generated silence/noise; no microphone",
+  "game_tested": false,
+  "cases": [
+    {
+      "id": "denis-address",
+      "reference": "Джокер, привет! Расскажи, что ты умеешь.",
+      "text": "Джокер, привет. Расскажи, что ты умеешь.",
+      "milliseconds": 4157,
+      "word_errors": 0,
+      "words": 6
+    },
+    {
+      "id": "irina-role",
+      "reference": "Джокер, давай сегодня поговорим с домохозяйкой.",
+      "text": "Джокер, давай сегодня поговорим с домохозяйкой.",
+      "milliseconds": 2078,
+      "word_errors": 0,
+      "words": 6
+    },
+    {
+      "id": "denis-task",
+      "reference": "Сначала собери дерево, потом подойди ко мне.",
+      "text": "Сначала собери дерево, потом подойди ко мне.",
+      "milliseconds": 1859,
+      "word_errors": 0,
+      "words": 7
+    },
+    {
+      "id": "irina-stop",
+      "reference": "Джокер, остановись, пожалуйста.",
+      "text": "Джокер, остановись, пожалуйста.",
+      "milliseconds": 1656,
+      "word_errors": 0,
+      "words": 3
+    },
+    {
+      "id": "silence",
+      "text": "",
+      "expected_empty": true,
+      "milliseconds": 47
+    },
+    {
+      "id": "white-noise",
+      "text": "",
+      "expected_empty": true,
+      "milliseconds": 31
+    }
+  ],
+  "cancellation": {
+    "outcome": [
+      "cancelled"
+    ],
+    "milliseconds": 47,
+    "worker_closed": true,
+    "thread_finished": true
+  },
+  "passed": true
+}

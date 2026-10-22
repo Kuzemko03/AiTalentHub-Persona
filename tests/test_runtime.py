@@ -234,6 +234,7 @@ class RuntimeTests(unittest.TestCase):
         process.communicate.return_value = ("\n".join(json.dumps(e) for e in events), "")
         self.settings.codex_bin = "codex"
         with patch("joker.backends.subprocess.Popen", return_value=process) as launch, \
+                patch("joker.backends.CodexBackend.executable", return_value="codex"), \
                 patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "private-test-value", "OPENAI_API_KEY": "private-api-value",
                                           "AWS_SESSION_TOKEN": "private-aws-value", "CUSTOM_DATABASE_PASSWORD": "private-db-value",
                                           "OPENAI_BASE_URL": "https://example.invalid/"}):
@@ -327,7 +328,8 @@ class RuntimeTests(unittest.TestCase):
         process = Mock(returncode=0)
         process.communicate.return_value = ('[]\n', '')
         self.settings.codex_bin = "codex"
-        with patch("joker.backends.subprocess.Popen", return_value=process), self.assertRaises(ModelError):
+        with patch("joker.backends.subprocess.Popen", return_value=process), \
+                patch("joker.backends.CodexBackend.executable", return_value="codex"), self.assertRaises(ModelError):
             CodexBackend(self.settings).generate("роль", [], threading.Event())
 
     def test_model_memory_has_a_bounded_validated_structure(self):

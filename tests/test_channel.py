@@ -99,7 +99,8 @@ class ChannelTests(unittest.TestCase):
             return process
 
         self.app.settings.codex_bin = "codex"
-        with patch("joker.backends.subprocess.Popen", side_effect=launch):
+        with patch("joker.backends.subprocess.Popen", side_effect=launch), \
+                patch("joker.backends.CodexBackend.executable", return_value="codex"):
             result = CodexBackend(self.app.settings).generate("Редактор", [], threading.Event(), schema=POST_SCHEMA)
         self.assertEqual(captured, [POST_SCHEMA])
         self.assertEqual(result["text"], payload()["text"])

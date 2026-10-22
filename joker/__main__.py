@@ -1,6 +1,5 @@
 import argparse
 import json
-import shutil
 import threading
 import sys
 
@@ -13,6 +12,10 @@ from .lifecycle import InstanceLock, snapshot
 
 
 def main():
+    if sys.argv[1:2] == ["stt"]:
+        from .stt import cli
+        cli(sys.argv[2:], Settings.load())
+        return
     if sys.argv[1:2] == ["tts"]:
         from .tts import cli
         cli(sys.argv[2:], Settings.load())
@@ -42,8 +45,14 @@ def main():
         return
     if args.mode == "doctor":
         from .minecraft import probe
+        from .backends import CodexBackend
+        try:
+            CodexBackend(settings).executable()
+            codex_found = True
+        except ModelError:
+            codex_found = False
         print(json.dumps({"backend": settings.backend, "model": settings.model,
-                          "codex_found": bool(settings.codex_bin or shutil.which("codex")),
+                          "codex_found": codex_found,
                           "telegram_token_configured": bool(settings.telegram_token),
                           "owner_configured": bool(settings.owner_id),
                           "panel": f"http://127.0.0.1:{settings.panel_port}",

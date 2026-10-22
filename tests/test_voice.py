@@ -178,7 +178,7 @@ class AudioHTTPTests(Fixture):
         self.settings.tts_model = "fixture_tts"
         provider = AudioHTTP(self.settings)
         try:
-            self.assertEqual(provider.transcribe(b"\x00\x00" * 960), "Джокер, привет")
+            self.assertEqual(provider.transcribe(b"\x00\x00" * 4800), "Джокер, привет")
             self.assertEqual(provider.synthesize("Привет", "fixture_voice")[1:], (48000, 1))
             self.assertIn(b'filename="speech.wav"', received[0][2])
             self.assertIn(b"RIFF", received[0][2])

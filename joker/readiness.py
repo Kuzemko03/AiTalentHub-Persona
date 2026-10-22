@@ -1,6 +1,7 @@
 """Read-only setup report; configuration is never presented as a completed live test."""
 from .backends import ModelError
 from .minecraft import NICK
+from .stt import status as stt_status
 
 
 def report(app):
@@ -27,9 +28,11 @@ def report(app):
     except ModelError as exc:
         add("output", "Выход речи", False, str(exc))
     conversation = app.voice.mode == "conversation"
-    add("stt", "Распознавание речи", s.stt_url and s.stt_model,
-        "STT настроен; живой запрос ещё не проверен." if s.stt_url and s.stt_model else
-        "Нужны STT_URL и STT_MODEL для голосовых обращений. Озвучка текста работает без STT.", not conversation)
+    stt = stt_status(s)
+    add("stt", "Распознавание речи", stt["ready"],
+        ("Локальный Whisper · " + stt["model"] + ". Проверь запись WAV в панели; игровой вход ещё не проверен."
+         if stt["backend"] == "whisper" else "HTTP STT настроен; живой запрос ещё не проверен.") if stt["ready"] else
+        "Установи локальный Whisper или настрой HTTP STT. Озвучка текста работает без распознавания.", not conversation)
     if conversation and app.voice.routes.configured("input"):
         try:
             app.voice.routes.stream_args("input", 48000, 1)

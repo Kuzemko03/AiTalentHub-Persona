@@ -63,13 +63,41 @@ def parse_object(text):
         raise ModelError("Модель вернула ответ без ожидаемой структуры.") from None
 
 
+def desktop_codex_root():
+    local = os.environ.get("LOCALAPPDATA")
+    return (Path(local) / "OpenAI/Codex/bin").resolve() if local else None
+
+
+def desktop_codex():
+    """Desktop updates replace version directories; select an installed executable only."""
+    root = desktop_codex_root()
+    if root is None:
+        return None
+    try:
+        candidates = [p for p in root.glob("*/codex.exe") if p.is_file() and p.resolve().is_relative_to(root)]
+        return str(max(candidates, key=lambda p: p.stat().st_mtime_ns)) if candidates else None
+    except OSError:
+        return None
+
+
 class CodexBackend:
     def __init__(self, settings: Settings):
         self.settings = settings
 
     def executable(self):
         configured = self.settings.codex_bin
-        binary = configured or shutil.which("codex")
+        if configured:
+            binary = shutil.which(configured)
+            if binary or Path(configured).is_file():
+                return binary or configured
+            path, root = Path(configured).resolve(), desktop_codex_root()
+            # Only a removed Desktop-managed version may recover automatically.
+            if root is not None and path.name.casefold() == "codex.exe" and path.parent.parent == root:
+                binary = desktop_codex()
+                if binary:
+                    return binary
+            raise ModelError("CODEX_BIN не найден. Укажи действующий CLI или очисти CODEX_BIN для автоматического поиска.")
+        binary = shutil.which("codex") or desktop_codex()
         if not binary:
             raise ModelError("Codex CLI не найден. Установите CLI и выполните codex login.")
         return binary
