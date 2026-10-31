@@ -12,12 +12,17 @@ from .errands import DECISION as ERRAND_DECISION
 
 PLAN_SCHEMA = {"type": "object", "properties": {
     "state": {"anyOf": [{"type": "null"}, STATE]},
-    "action": {"type": "string", "enum": ["wait", "follow", "come", "collect", "deliver", "sleep"]},
+    "action": {"type": "string", "enum": ["wait", "follow", "come", "collect", "deliver", "sleep", "approach", "say", "walk"]},
     "item": {"type": "string", "maxLength": 80},
+    "player": {"type": "string", "maxLength": 16},
+    "message": {"type": "string", "maxLength": 240},
+    "x": {"type": "integer", "minimum": -30000000, "maximum": 30000000},
+    "y": {"type": "integer", "minimum": -64, "maximum": 319},
+    "z": {"type": "integer", "minimum": -30000000, "maximum": 30000000},
     "count": {"type": "integer", "minimum": 1, "maximum": 256},
     "seconds": {"type": "integer", "minimum": 60, "maximum": 3600},
     "note": {"type": "string", "maxLength": 500}},
-    "required": ["action", "item", "count", "seconds", "note", "state"], "additionalProperties": False}
+    "required": ["action", "item", "player", "message", "x", "y", "z", "count", "seconds", "note", "state"], "additionalProperties": False}
 
 
 class Runtime:
@@ -40,6 +45,8 @@ class Runtime:
     def status(self):
         with self.app.guard:
             return {**self.state, "plan": self.app.store.get("runtime_plan", []),
+                    "planning": self.planning,
+                    "next_decision_in": max(0, int(self.next_tick - time.time())) if self.state["enabled"] else 0,
                     "daily_limit": self.app.settings.runtime_daily_requests}
 
     def pause(self):
@@ -157,7 +164,7 @@ class Runtime:
                 self.state["detail"] = "Проверь результат игровой задачи. Автономность на паузе."
                 self.save()
                 return
-            if game["busy"] or game["task"] and game["task"]["state"] not in ("collected", "arrived"):
+            if game["busy"] or game["task"] and game["task"]["state"] not in ("collected", "arrived", "not_arrived"):
                 return
             day = datetime.fromtimestamp(now, timezone.utc).date().isoformat()
             budget = self.app.store.get("runtime_budget", {"day": day, "used": 0})
@@ -199,7 +206,7 @@ class Runtime:
             system = "\n\n".join((self.app.home / file).read_text(encoding="utf-8")
                                    for file in ("PERSONA.md", "PLANNING.md"))
             result = self.app.backend.generate(system, [{"role": "user", "content": json.dumps(
-                {"goal": goal, "game": game, "recent_plan": plan[-8:], "mask": mask,
+                {"goal": goal, "game": self.app.minecraft.observe(), "recent_plan": plan[-8:], "mask": mask,
                     "resources": self.app.minecraft.resources, "experience": self.app.experience.context(
                     "minecraft:" + self.app.settings.minecraft_owner.casefold()),
                     "game_memories": self.app.memory.recall(
@@ -207,8 +214,9 @@ class Runtime:
                 cancel, schema=PLAN_SCHEMA)
             action = result.get("action")
             count, seconds = result.get("count"), result.get("seconds")
-            if (action not in ("wait", "follow", "come", "collect", "deliver", "sleep")
-                    or not isinstance(result.get("item"), str) or result["item"] not in self.app.minecraft.resources
+            if (action not in ("wait", "follow", "come", "collect", "deliver", "sleep", "approach", "say", "walk")
+                    or not isinstance(result.get("item"), str)
+                    or action in ("collect", "deliver") and result["item"] not in self.app.minecraft.resources
                     or type(count) is not int or not 1 <= count <= 256
                     or type(seconds) is not int or not 60 <= seconds <= 3600
                     or not isinstance(result.get("note"), str) or len(result["note"]) > 500):
@@ -224,19 +232,35 @@ class Runtime:
                 elif action == "wait":
                     self.next_tick = now + seconds
                     outcome = "Ожидание."
+                elif action == "say":
+                    message = result.get("message")
+                    self.state["pending_action"] = {"action": action}
+                    self.save()
+                    observation = self.app.minecraft.say(message)
+                    outcome = observation["detail"]
+                    if observation["accepted"] is None:
+                        self.pause()
+                    else:
+                        self.state.pop("pending_action", None)
                 else:
                     self.state["pending_action"] = {"action": action, "item": result["item"], "count": count}
                     self.save()
                     actor = "minecraft:" + self.app.settings.minecraft_owner.casefold()
-                    observation = self.app.workplace.execute("game." + action,
-                        {"item": result["item"], "count": count} if action in ("collect", "deliver") else {},
+                    arguments = ({"item": result["item"], "count": count} if action in ("collect", "deliver") else
+                                 {"player": result.get("player")} if action == "approach" else
+                                 {k: result.get(k) for k in ("x", "y", "z")} if action == "walk" else {})
+                    observation = self.app.workplace.execute("game." + action, arguments,
                         actor=actor, owner=True, cancel=cancel, revision=revision, epoch=epoch,
                         turn_id="autonomy:" + uuid.uuid4().hex)
                     outcome = observation["detail"]
                 if result.get("state") is not None and action != "sleep":
                     self.app.experience.update("minecraft:" + self.app.settings.minecraft_owner.casefold(), result["state"])
                 record = {"at": self.app.store.now(), "action": action, "item": result["item"],
-                          "count": count, "note": result["note"], "result": outcome}
+                          "count": count, "player": result.get("player", ""),
+                          "message": result.get("message", "") if action == "say" else "",
+                          "persona_id": self.app.active,
+                          "destination": {k: result.get(k) for k in ("x", "y", "z")} if action == "walk" else None,
+                          "note": result["note"], "result": outcome}
                 self.app.store.set("runtime_plan", (plan + [record])[-20:])
                 self.state["detail"] = outcome
                 self.save()

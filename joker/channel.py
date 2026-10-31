@@ -15,9 +15,11 @@ from .roles import ROLE_ID, visual_description
 LOCAL_TZ = timezone(timedelta(hours=3), "Europe/Volgograd")
 SECRET = re.compile(r"\b(?:\d{8,12}:[A-Za-z0-9_-]{30,50}|gh[pousr]_[A-Za-z0-9]{25,}|sk-[A-Za-z0-9_-]{25,})\b")
 POST_SCHEMA = {"type": "object", "properties": {
-    "title": {"type": "string"}, "text": {"type": "string"}, "image_scene": {"type": "string"},
-    "novelty_key": {"type": "string"}, "mask": {"type": "string"},
-    "kind": {"type": "string", "enum": ["fictional_scene", "public_event"]}, "event_id": {"type": "string"}},
+    "title": {"type": "string", "minLength": 3, "maxLength": 120},
+    "text": {"type": "string", "minLength": 100, "maxLength": 2800},
+    "image_scene": {"type": "string", "minLength": 20, "maxLength": 1600},
+    "novelty_key": {"type": "string", "minLength": 5, "maxLength": 160}, "mask": {"type": "string"},
+    "kind": {"type": "string", "enum": ["fictional_scene", "public_event", "project_note"]}, "event_id": {"type": "string"}},
     "required": ["title", "text", "image_scene", "novelty_key", "mask", "kind", "event_id"], "additionalProperties": False}
 IMAGE_STYLE = (
     "Use case: photorealistic-natural. Candid square editorial photograph of a fictional adult. "
@@ -50,7 +52,7 @@ def validate_post(value):
         if not minimum <= len(text) <= maximum:
             raise ChannelError("Неверная длина поля публикации: " + key)
         result[key] = text
-    if not isinstance(value.get("mask"), str) or not ROLE_ID.fullmatch(value["mask"]) or value.get("kind") not in ("fictional_scene", "public_event"):
+    if not isinstance(value.get("mask"), str) or not ROLE_ID.fullmatch(value["mask"]) or value.get("kind") not in ("fictional_scene", "public_event", "project_note"):
         raise ChannelError("Неверная маска или источник публикации.")
     result.update(mask=value["mask"], kind=value["kind"], event_id=value.get("event_id", ""))
     if not isinstance(result["event_id"], str):
@@ -172,13 +174,14 @@ class ChannelService:
                   if p["status"] in ("draft", "published", "publishing")]
         return min(pool, key=lambda key: (recent.count(key), -recent.index(key) if key in recent else -999))
 
-    def generate(self, expected_revision=None, *, topic="", auto_role=False):
+    def generate(self, expected_revision=None, *, topic="", auto_role=False, held_cancel=None):
         topic = public_text(topic)
         if len(topic) > 1000:
             raise ChannelError("Тема черновика должна быть короче 1000 символов.")
-        if not self.app.generation.acquire(blocking=False):
+        borrowed = held_cancel is not None
+        if not borrowed and not self.app.generation.acquire(blocking=False):
             raise ChannelError("Сейчас идёт разговор. Подготовку поста можно повторить позже.")
-        cancel = threading.Event()
+        cancel = held_cancel if borrowed else threading.Event()
         call_id = None
         try:
             with self.app.guard:
@@ -200,7 +203,7 @@ class ChannelService:
                       + (root / "agent/joker/PERSONA.md").read_text(encoding="utf-8")
                       + '\nТы пишешь пост, а не ответ собеседнику. Верни JSON с полями title, text, image_scene '
                       '(описание одной сцены по-английски), novelty_key (суть нового конфликта), '
-                      'mask (id текущего автора), kind (fictional_scene/public_event), event_id. '
+                      'mask (id текущего автора), kind (fictional_scene/public_event/project_note), event_id. '
                       'Не добавляй заголовок и подпись внутрь text: приложение добавит их само. '
                       'Пиши только от лица active_role; поле mask должно совпадать с её id. '
                       'Не вставляй в историю Джокера, белую маску и других внутренних персонажей. '
@@ -209,8 +212,12 @@ class ChannelService:
                       'тип источника укажи только в kind, без служебных пояснений читателю. '
                       'Внешние ссылки, чужие люди и новые технические факты не нужны. '
                       'Пост должен развиваться, а не повторять одну шутку пятью абзацами.')
+            system += (' Если владелец просит рассказать об устройстве проекта, напиши фактическую заметку '
+                       'kind=project_note с event_id="", используя только implementation. Не придумывай реализации '
+                       'и не превращай такую тему в бытовую выдумку. Имена STT/TTS и модель бери из переданных данных.')
+            from .capabilities import implementation
             context = {"active_role": author, "requested_topic": topic, "public_event": event, "seed_for_inspiration": seed if not topic else None,
-                       "recent_public_editorial_material": recent}
+                       "recent_public_editorial_material": recent, "implementation": implementation(self.app)}
             result = self.app.backend.generate(system, [{"role": "user", "content": json.dumps(context, ensure_ascii=False)}], cancel,
                                                schema=POST_SCHEMA)
             with self.app.guard:
@@ -235,8 +242,9 @@ class ChannelService:
                     raise Cancelled("Подготовка поста отменена.")
                 payload = validate_post(result)
                 payload["mask"] = author["id"]
-                payload["kind"] = "public_event" if event else "fictional_scene"
-                payload["event_id"] = event["id"] if event else ""
+                project_note = payload["kind"] == "project_note"
+                payload["kind"] = "project_note" if project_note else "public_event" if event else "fictional_scene"
+                payload["event_id"] = event["id"] if event and not project_note else ""
                 saved = self.save(payload)
                 self.store.finish_call(call_id, {"status": "done", "purpose": "channel", "model": result["model"],
                                                 "latency": result["latency"], "usage": result["usage"]})
@@ -247,9 +255,10 @@ class ChannelService:
             raise
         finally:
             with self.app.guard:
-                if self.app.active_cancel is cancel:
+                if not borrowed and self.app.active_cancel is cancel:
                     self.app.active_cancel = None
-            self.app.generation.release()
+            if not borrowed:
+                self.app.generation.release()
 
     def photo_path(self, row):
         if not row or not row["photo"]:

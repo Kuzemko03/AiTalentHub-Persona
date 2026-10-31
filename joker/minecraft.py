@@ -38,6 +38,27 @@ def chat_text(text):
     return text.lstrip(" /@;!$\\")[:240]
 
 
+def chat_chunks(text):
+    """Split normal replies on word boundaries; never send an executable prefix."""
+    normalized = " ".join(str(text).split())
+    words = "".join(c for c in normalized if c.isprintable() and c != "§").split()
+    chunks, line = [], ""
+    for word in words:
+        if len(word.encode("utf-16-le")) // 2 > 240:
+            raise ValueError("В ответе есть слишком длинное слово; нужен более короткий ответ.")
+        candidate = line + (" " if line else "") + word
+        if len(candidate.encode("utf-16-le")) // 2 > 240:
+            chunks.append(line.lstrip(" /@;!$\\"))
+            line = word
+        else:
+            line = candidate
+    if line:
+        chunks.append(line.lstrip(" /@;!$\\"))
+    if len(chunks) > 4:
+        raise ValueError("Ответ слишком длинный для игрового чата; нужен ответ до четырёх сообщений.")
+    return [line for line in chunks if line]
+
+
 class MinecraftService:
     def __init__(self, app):
         self.app = app
@@ -147,19 +168,33 @@ class MinecraftService:
             self.busy = busy
             if self.task and self.task["kind"] in ("collect", "deliver"):
                 advance(self, busy)
-            elif self.task and self.task["kind"] == "come":
+            elif self.task and self.task["kind"] == "walk":
+                from .navigation import refresh
+                refresh(self, busy)
+            elif self.task and self.task["kind"] in ("come", "approach"):
+                target = self.task["target"]
+                distance = owner_distance(entry, target)
                 if self.task.get("state") in ("failed", "unconfirmed", "arrived"):
                     pass
-                elif time.monotonic() - self.task.get("started_at", time.monotonic()) > 900:
+                elif self.task.get("phase") == "target_lost_stopping":
+                    if not busy:
+                        self.task.update(state="not_arrived", detail="Игрок ушёл из видимости; движение остановлено. Можно выбрать новую цель.")
+                elif self.task["kind"] == "approach" and not math.isfinite(distance):
                     entry.stopPathing()
-                    self.task.update(state="failed", detail="Истекли 15 минут ожидания подхода. Проверь игру.")
+                    self.task.update(state="running", phase="target_lost_stopping",
+                                     detail="Выбранный игрок больше не виден; проверяется остановка.")
+                elif time.monotonic() - self.task.get("started_at", time.monotonic()) > (90 if self.task["kind"] == "approach" else 900):
+                    entry.stopPathing()
+                    limit = "90 секунд" if self.task["kind"] == "approach" else "15 минут"
+                    self.task.update(state="failed", detail=f"Истекли {limit} ожидания подхода. Проверь игру.")
                 elif self.task.get("phase") == "stopping":
                     if not busy:
-                        if owner_distance(entry, self.settings.minecraft_owner) <= 3:
-                            self.task.update(state="arrived", detail="Владелец в пределах трёх блоков, движение остановлено.")
+                        if distance <= 3:
+                            self.task.update(state="arrived", detail=f"{target} в пределах трёх блоков, движение остановлено.")
                         else:
-                            self.task.update(state="unconfirmed", detail="Владелец отошёл до завершения остановки. Проверь подход.")
-                elif owner_distance(entry, self.settings.minecraft_owner) <= 3:
+                            self.task.update(state="not_arrived" if self.task["kind"] == "approach" else "unconfirmed",
+                                             detail="Игрок отошёл; движение остановлено, прибытие не подтверждено.")
+                elif distance <= 3:
                     entry.stopPathing()
                     self.task.update(phase="stopping", state="running")
                 elif busy:
@@ -175,6 +210,19 @@ class MinecraftService:
     def stop_task(self):
         with self.app.guard, self.lock:
             return self._stop_task()
+
+    def release_task(self):
+        with self.app.guard, self.lock:
+            previous = (self.task or {}).get("kind")
+            if self.task and self.task.get("kind") not in ("follow", "come", "approach", "walk", "stop"):
+                return {"accepted": False, "completed": False,
+                        "detail": "Состояние ресурсного поручения требует проверки владельцем. Маршрут не заменён."}
+            detail = self._stop_task()
+            stopped = self.entry is not None and self.task is None
+            if stopped and self.app.runtime.state.get("pending_action", {}).get("action") == previous:
+                self.app.runtime.state.pop("pending_action", None)
+                self.app.runtime.save()
+            return {"accepted": stopped, "completed": stopped, "detail": detail}
 
     def _stop_task(self):
         entry = self.entry
@@ -227,29 +275,88 @@ class MinecraftService:
                 name = str(raw.get("name", ""))
                 distance = float(raw.get("distance", "nan"))
                 if NICK.fullmatch(name) and math.isfinite(distance) and distance >= 0:
-                    players.append({"name": name, "distance": round(distance, 2)})
+                    player = {"name": name, "distance": round(distance, 2)}
+                    position = str(raw.get("position", ""))
+                    if re.fullmatch(r"-?\d+(?:\.\d+)?,\s*-?\d+(?:\.\d+)?,\s*-?\d+(?:\.\d+)?", position):
+                        player["position"] = [float(v) for v in position.split(",")]
+                    for key in ("hand_item", "ground_block", "gamemode"):
+                        value = str(raw.get(key, ""))
+                        if value:
+                            player[key] = value[:100]
+                    players.append(player)
             result["nearby_players"] = players[:64]
+            result["self"] = next((p for p in players if p["name"].casefold() == self.settings.minecraft_bot.casefold()), None)
         except Exception:
             result["observation_error"] = "Не все игровые сведения доступны."
+        try:
+            from .navigation import surface
+            result["surface_map"] = surface(self.entry, result.get("self"))
+        except Exception:
+            result["surface_map"] = []
         return result
 
     def trace_task(self):
-        task = {k: v for k, v in (self.task or {}).items() if k != "started_at"}
+        task = {k: v for k, v in (self.task or {}).items() if k not in ("started_at", "last_progress_at", "last_position")}
         if task != self._last_task_event:
             self._last_task_event = dict(task)
             self.app.experience.record("world:minecraft", "minecraft", "task.observed", task)
-        if (not task or task.get("state") in ("collected", "arrived")) and not self.busy:
+            if task.get("state") in ("arrived", "collected", "not_arrived") and hasattr(self.app, "runtime"):
+                self.app.runtime.next_tick = 0  # A completed leg makes the model lane ready again.
+                if self.app.runtime.state.get("pending_action", {}).get("action") == task.get("kind"):
+                    self.app.runtime.state.pop("pending_action", None)
+                    self.app.runtime.save()
+        if (not task or task.get("state") in ("collected", "arrived", "not_arrived")) and not self.busy:
             self.app.store.set("pending_game_action", None)
         if hasattr(self.app, "errands"):
             self.app.errands.observe(task, self.busy)
 
-    def execute(self, action, item=None, count=None, *, task_id=None):
+    def say(self, message):
+        """Bounded public chat transport. Model-written content, durable no-replay receipt."""
+        if not isinstance(message, str):
+            raise ValueError("Нужен текст игрового сообщения.")
+        message = " ".join(message.split())
+        message = "".join(c for c in message if c.isprintable() and c != "§")
+        if (not message or message[0] in "/@;!$\\" or len(message.encode("utf-16-le")) // 2 > 240):
+            raise ValueError("Нужна обычная реплика до 240 символов, без команд.")
+        with self.app.guard, self.lock:
+            if self.entry is None:
+                return {"accepted": False, "completed": False, "detail": "Minecraft не подключён. Сообщение не отправлено."}
+            now = time.time()
+            outbox = self.app.store.get("game_chat_outbox", [])
+            if any(p["message"] == message and (p["state"] != "queued" or now - p["at"] < 300) for p in outbox):
+                return {"accepted": False, "completed": False, "detail": "Эта реплика уже отправлялась. Автоматический повтор не выполнен."}
+            if outbox and now - outbox[-1]["at"] < 15:
+                return {"accepted": False, "completed": False, "detail": "Пауза между инициативными сообщениями — 15 секунд. Сообщение не отправлено."}
+            if not self.entry.inGame():
+                return {"accepted": False, "completed": False, "detail": "Игровой мир закрыт. Сообщение не отправлено."}
+            receipt = {"id": uuid.uuid4().hex, "at": now, "message": message, "state": "pending"}
+            outbox = (outbox + [receipt])[-30:]
+            self.app.store.set("game_chat_outbox", outbox)
+            try:
+                self.entry.ChatMessage(message)
+            except Exception:
+                receipt["state"] = "uncertain"
+                self.app.store.set("game_chat_outbox", outbox)
+                return {"accepted": None, "completed": False, "detail": "Приём сообщения неизвестен. Повтор не выполняется; проверь игровой чат."}
+            receipt["state"] = "queued"
+            self.app.store.set("game_chat_outbox", outbox)
+            self.app.experience.record("world:minecraft", "minecraft", "chat.submitted", {"message": message})
+            self.app.voice.enqueue(message, self.app.store.get("response_revision", 0), self.epoch)
+            return {"accepted": True, "completed": False, "message": message,
+                    "detail": "Реплика передана в очередь игрового чата. Доставка сервером ещё не подтверждена."}
+
+    def execute(self, action, item=None, count=None, *, player=None, x=None, y=None, z=None, task_id=None):
         """Typed bridge operation. No user text, aliases or behavior selection."""
-        if action not in ("follow", "come", "collect", "deliver"):
+        if action not in ("follow", "come", "collect", "deliver", "approach", "walk"):
             raise ValueError("Неизвестный игровой инструмент.")
         if action in ("collect", "deliver") and (not isinstance(item, str) or item not in self.resources
                 or type(count) is not int or not 1 <= count <= 256):
             raise ValueError("Нужен ресурс из каталога и количество от 1 до 256.")
+        if action == "approach" and (not isinstance(player, str) or not NICK.fullmatch(player)):
+            raise ValueError("Нужен точный игровой ник выбранного игрока.")
+        if action == "walk":
+            from .navigation import validate_point
+            validate_point(x, y, z)
         with self.app.guard, self.lock:
             queue = getattr(self.app, "errands", None)
             if queue and queue.owns_game() and (not task_id or task_id != queue.current()["task_id"]
@@ -258,24 +365,42 @@ class MinecraftService:
                         "detail": "Сначала приостанови и отмени список поручений. Отдельное действие не отправлено."}
             if self.entry is None:
                 return {"accepted": False, "completed": False, "detail": "Minecraft не подключён. Поручение не отправлено."}
-            if self.task and self.task.get("state") not in ("collected", "arrived"):
+            if self.task and self.task.get("state") not in ("collected", "arrived", "not_arrived"):
                 return {"accepted": False, "completed": False,
                         "detail": "Сначала проверь прежнее поручение и нажми «стоп».", "task": dict(self.task)}
             try:
                 if not self.entry.inGame() or self.entry.hasActiveTask():
                     return {"accepted": False, "completed": False,
                             "detail": "Мир закрыт или есть активная задача. Проверь игру и нажми «стоп»; новое поручение не отправлено."}
+                if action == "walk":
+                    from .navigation import start
+                    return start(self, x, y, z, task_id)
+                target = self.settings.minecraft_owner
+                if action == "approach":
+                    visible = {}
+                    for p in self.entry.getPlayersInfo(64):
+                        name = str(p.get("name", ""))
+                        try:
+                            distance = float(p.get("distance", "nan"))
+                        except (TypeError, ValueError):
+                            continue
+                        if NICK.fullmatch(name) and math.isfinite(distance) and 0 <= distance <= 96:
+                            visible[name.casefold()] = name
+                    target = visible.get(player.casefold())
+                    if not target or target.casefold() == self.settings.minecraft_bot.casefold():
+                        return {"accepted": False, "completed": False,
+                                "detail": f"Игрок {player} не виден рядом. Подход не начат; владелец не подставлялся."}
                 task = {"id": task_id or uuid.uuid4().hex, "kind": action,
-                        "target": self.settings.minecraft_owner, "state": "submitted"}
-                if action == "come":
+                        "target": target, "state": "submitted"}
+                if action in ("come", "approach"):
                     task["started_at"] = time.monotonic()
                 if action in ("collect", "deliver"):
                     task.update(item=item, count=count, phase="collect", started_at=time.monotonic())
                 # Write intent before any bridge side effect; never replay it after restart.
                 self.app.store.set("pending_game_action", {k: v for k, v in task.items() if k != "started_at"})
                 self.task = task
-                if action in ("follow", "come"):
-                    self.entry.ChatMessage(";followPlayer " + self.settings.minecraft_owner)
+                if action in ("follow", "come", "approach"):
+                    self.entry.ChatMessage(";followPlayer " + target)
                 else:
                     self.entry.ExecuteCommand(f"@get {item} {count}")
                 self.trace_task()
@@ -380,14 +505,22 @@ class MinecraftService:
                 result, revision = answer["reply"], answer["_revision"]
                 if answer.get("_transition"):
                     voice_ticket = None
-            reply = chat_text(result)
+            parts = chat_chunks(result)
+            reply = " ".join(parts)
             if source == "voice":
                 self.app.voice.metrics["reply_ms"] = round((time.monotonic() - started) * 1000)
+            for index, part in enumerate(parts):
+                with self.app.guard, self.lock:
+                    if (self.entry is None or epoch != self.epoch or self.shutdown.is_set()
+                            or revision != self.app.store.get("response_revision", 0)
+                            or voice_ticket is not None and not self.app.voice.current(voice_ticket)):
+                        return True
+                    self.entry.ChatMessage(part)
+                if index < len(parts) - 1 and self.shutdown.wait(3):
+                    return True
             with self.app.guard, self.lock:
-                if (reply and self.entry is not None and epoch == self.epoch and not self.shutdown.is_set()
-                        and revision == self.app.store.get("response_revision", 0)
+                if (reply and revision == self.app.store.get("response_revision", 0) and epoch == self.epoch
                         and (voice_ticket is None or self.app.voice.current(voice_ticket))):
-                    self.entry.ChatMessage(reply)
                     self.event("reply.submitted", {"actor": sender, "chars": len(reply), "source": source})
                     self.app.voice.enqueue(reply, revision, epoch, ticket=voice_ticket)
             return True

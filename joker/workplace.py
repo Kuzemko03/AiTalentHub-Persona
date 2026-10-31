@@ -25,8 +25,15 @@ class Workplace:
 
     def context(self, actor, owner=None):
         permitted = self.is_owner(actor, owner)
+        from .capabilities import implementation
+        target = self.app.store.get("channel_target", {}) if actor == "owner" and permitted else {}
+        drafts = ([{"id": p["id"], "status": p["status"], "title": json.loads(p["payload"])["title"]}
+                   for p in self.app.store.channel_posts(8)] if actor == "owner" and permitted else [])
         return {"available_tools": [{"name": name, "description": spec[0], "arguments": spec[1]}
-                    for name, spec in TOOLS.items() if permitted or not spec[2]],
+                    for name, spec in TOOLS.items() if (permitted or not spec[2])
+                    and (not name.startswith("channel.") or actor == "owner")],
+                "implementation": implementation(self.app),
+                "channel": {"connected": bool(target), "title": target.get("title", ""), "drafts": drafts},
                 "guides": GUIDES, "resources": self.app.minecraft.resources,
                 "personas": [{"id": m["id"], "name": m["display_name"], "role": m["role"]}
                              for m in self.app.masks.values()],
@@ -48,11 +55,15 @@ class Workplace:
             raise ModelError("Модель передала неверные параметры инструмента.") from None
         if spec[2] and not self.is_owner(actor, owner):
             raise ModelError("У этого собеседника нет права управления.")
+        if name.startswith("channel.") and actor != "owner":
+            raise ModelError("Редакция Telegram доступна только из личного диалога владельца.")
         if name == "role.create" and (not arguments["description"].strip() or arguments["description"] not in text):
             raise ModelError("Описание новой роли должно быть фрагментом текущей просьбы владельца.")
+        if name == "game.say" and not arguments["request"].strip():
+            raise ModelError("Нужна тема или замысел публичной реплики.")
         with self.app.guard:
             self.check(cancel, revision, epoch)
-            if spec[2] and name != "game.stop":
+            if spec[2] and name not in ("game.stop", "game.release"):
                 claimed, previous = self.app.experience.claim_effect(turn_id, actor, name)
                 if not claimed:
                     return {"ok": False, "code": "mutation_not_repeated", "previous": previous,
@@ -63,11 +74,24 @@ class Workplace:
         if name == "role.create":
             result = self.app.roles.adopt(arguments["description"], expected_revision=revision, held_cancel=cancel,
                                           before_install=lambda: self.check(cancel, revision, epoch))
+        elif name == "game.say":
+            from .public_speech import speak
+            result = speak(self.app, arguments["request"], cancel, lambda: self.check(cancel, revision, epoch))
+        elif name == "channel.post":
+            result = self.app.channel.generate(expected_revision=revision, topic=arguments["topic"], held_cancel=cancel)
+            if arguments["publish"]:
+                with self.app.guard:
+                    self.check(cancel, revision, epoch)
+                result = self.app.channel.publish(result["id"], automatic=False)
+        elif name == "channel.publish":
+            with self.app.guard:
+                self.check(cancel, revision, epoch)
+            result = self.app.channel.publish(arguments["id"], automatic=False)
         else:
             with self.app.guard:
                 self.check(cancel, revision, epoch)
                 result = self.dispatch(name, arguments, actor, game_task_id=game_task_id)
-        if spec[2] and name != "game.stop":
+        if spec[2] and name not in ("game.stop", "game.release"):
             self.app.experience.finish_effect(turn_id, result)
         recorded = result
         if name == "memory.search":
@@ -84,6 +108,14 @@ class Workplace:
             return self.app.minecraft.observe()
         if name == "game.stop":
             reply = self.app.stop()
+            return {"reply": reply, "_revision": self.app.store.get("response_revision", 0), "_mask": self.app.active}
+        if name == "game.release":
+            return self.app.minecraft.release_task()
+        if name == "life.start":
+            if not arguments["goal"].strip():
+                raise ModelError("Нужна цель самостоятельной работы.")
+            self.app.runtime.command("/цель " + arguments["goal"].strip())
+            reply = self.app.runtime.command("/автономность вкл")
             return {"reply": reply, "_revision": self.app.store.get("response_revision", 0), "_mask": self.app.active}
         if name.startswith("game."):
             return self.app.minecraft.execute(name.removeprefix("game."), **arguments, task_id=game_task_id)
@@ -165,7 +197,7 @@ class Workplace:
                 if signature in seen and TOOLS.get(tool["name"], (None, None, False))[2]:
                     raise ModelError("Повтор инструмента в одном решении остановлен.")
                 seen.add(signature)
-                terminal = (tool["name"] in ("game.stop", "role.select", "role.create")
+                terminal = (tool["name"] in ("game.stop", "life.start", "role.select", "role.create")
                     or tool["name"] == "queue.control" and tool["arguments"].get("action") in ("pause", "cancel"))
                 if not terminal:
                     # Ensure a budgeted follow-up exists BEFORE a game side effect.

@@ -13,6 +13,7 @@ from .errands import QueueConflict
 from .audio_routes import RouteConflict
 from .readiness import report as readiness_report
 from .stt import MAX_WAV
+from .channel import ChannelError
 
 
 class BoundedServer(ThreadingHTTPServer):
@@ -293,6 +294,8 @@ def make_server(app, port=None):
                 self.respond({"error": str(exc)}, 503)
             except TelegramError as exc:
                 self.respond({"error": str(exc)}, 503)
+            except ChannelError as exc:
+                self.respond({"error": str(exc)}, 400)
             except (ValueError, KeyError, TypeError, OSError, RecursionError):
                 self.respond({"error": "Проверьте поля запроса."}, 400)
 

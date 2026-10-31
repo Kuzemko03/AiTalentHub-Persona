@@ -90,12 +90,15 @@ class App:
                 return "Такой маски нет. Доступны: " + ", ".join(self.masks)
             if self.active_cancel:
                 self.active_cancel.set()
+            previous_mask = self.active
             self.store.set("active_mask", mask_id)
             self.store.set("mask_revision", self.store.get("mask_revision", 0) + 1)
             self.store.set("response_revision", self.store.get("response_revision", 0) + 1)
             self.store.cancel_pending()
             self.voice.cancel_pending()
             mask = self.masks[mask_id]
+            self.experience.record("world:minecraft", "character", "persona.changed",
+                {"previous_id": previous_mask, "current_id": mask_id, "name": mask["display_name"], "role": mask["role"]})
             return mask["confirmation"]
 
     def status(self, actor="owner"):
@@ -103,8 +106,9 @@ class App:
             return self._status(actor)
 
     def _status(self, actor):
+        from . import __version__
         mask = self.masks[self.active]
-        return {"name": mask["display_name"], "mask": mask["id"],
+        return {"version": __version__, "name": mask["display_name"], "mask": mask["id"],
                 "backend": self.settings.backend,
                 "model": self.settings.model if self.settings.backend == "codex" else self.settings.api_model,
                 "memory": self.store.facts(actor), "minecraft": self.minecraft.status()["detail"],

@@ -22,10 +22,37 @@ ERRAND_CONTROL = obj({"id": string(40), "version": {"type": "integer", "minimum"
 TOOLS = {
     "game.observe": ("Read connection, current task, inventory and nearby players. Does not move.", obj(), False),
     "game.follow": ("Start following the configured owner; an ongoing task, not a completed arrival.", obj(), True),
-    "game.come": ("Approach the configured owner, stopping when arrival is observed.", obj(), True),
+    "game.come": ("Approach ONLY the configured owner. Never use for a different named player. Stops on observed arrival.", obj(), True),
+    "game.approach": ("Approach a specific currently visible player by their exact observed nickname; stop within 3 blocks. "
+                      "Read game.observe to resolve names. Never substitutes the owner for a missing player.",
+                      obj({"player": string(16)}), True),
+    "game.say": ("Send one public Minecraft chat message and voice it if voice is enabled. request is a short "
+                 "description of what to say, or a creative social brief when the owner delegates wording. "
+                 "Do not copy private facts into the brief. A separate writer receives the brief, persona "
+                 "and public game observations, never private history. Submission is not proof of delivery.",
+                 obj({"request": string(1000)}), True),
+    "game.walk": ("Walk to a chosen nearby coordinate to explore the world. Read game.observe for your position "
+                  "and surface map first. One leg is at most 32 horizontal blocks and 8 vertical blocks. "
+                  "Arrival is checked in the game; never claim a submitted path is completed.",
+                  obj({"x": {"type": "integer", "minimum": -30000000, "maximum": 30000000},
+                       "y": {"type": "integer", "minimum": -64, "maximum": 319},
+                       "z": {"type": "integer", "minimum": -30000000, "maximum": 30000000}}), True),
     "game.collect": ("Gather an exact quantity into Joker's inventory. Does not hand items over.", RESOURCE, True),
     "game.deliver": ("Gather and hand the exact quantity to the configured owner. Pickup is not verified.", RESOURCE, True),
-    "game.stop": ("Cancel the current game task and pending turns; report the actual stop acknowledgement.", obj(), True),
+    "game.release": ("Stop only the current movement so you can continue this request with another action. "
+                     "Does not cancel the dialogue or pause autonomous life. Cannot resolve uncertain resource delivery.", obj(), True),
+    "game.stop": ("Full STOP requested by owner: cancels the current request and pauses autonomous life. "
+                  "Never use as preparation for walking or socializing; use game.release or life.start instead.", obj(), True),
+    "life.start": ("Start autonomous exploration/social activity from the owner's delegated goal. Choose this for "
+                   "ongoing requests such as walking around, exploring buildings and meeting people without step-by-step orders. "
+                   "The model will choose actions using current observations and current persona. Not for hypothetical requests.",
+                   obj({"goal": string(1000)}), True),
+    "channel.post": ("Prepare a post for the owner's configured Telegram channel. Use actual implementation facts "
+                     "for technical topics. publish=true when the owner requests posting to the channel; false "
+                     "when only a draft is requested. Only private owner conversations may use this tool.",
+                     obj({"topic": string(1000), "publish": {"type": "boolean"}}), True),
+    "channel.publish": ("Publish an existing draft by ID on the owner's explicit request. Private owner only. "
+                        "Never retry uncertain delivery or enable scheduled posting.", obj({"id": string(40)}), True),
     "queue.create": ("Save 1-8 ordered Minecraft errands, initially paused for owner review. Only come, collect, deliver. "
                      "For come use item='' and count=1. Never invent quantities. Follow is open-ended, not a queue step.", ERRAND_CREATE, True),
     "queue.control": ("Resume, pause or cancel the owner's saved queue by its current ID and version. "
@@ -55,6 +82,9 @@ def validate(value, schema):
     elif kind == "string":
         if not isinstance(value, str) or len(value) > schema.get("maxLength", 8000):
             raise ValueError("Неверная строка инструмента.")
+    elif kind == "boolean":
+        if type(value) is not bool:
+            raise ValueError("Неверный флаг инструмента.")
     elif kind == "integer":
         if type(value) is not int or not schema["minimum"] <= value <= schema["maximum"]:
             raise ValueError("Неверное число инструмента.")
