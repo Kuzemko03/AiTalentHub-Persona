@@ -1,4 +1,4 @@
-param([switch]$WithoutTelegram, [switch]$Minecraft, [switch]$Voice)
+﻿param([switch]$WithoutTelegram, [switch]$Minecraft, [switch]$Voice)
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $taskPython = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'

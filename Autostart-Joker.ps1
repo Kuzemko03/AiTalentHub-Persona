@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet('Status', 'Install', 'Remove')][string]$Action = 'Status',
     [switch]$Minecraft,
     [switch]$Voice,
