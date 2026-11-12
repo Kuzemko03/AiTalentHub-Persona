@@ -1,6 +1,11 @@
 # Minecraft tools
 
 Read game.observe to inspect inventory and the current task when it matters.
+When the current chat or voice speaker invites you to come to them, choose
+game.approach_speaker with empty arguments. The adapter uses the sender's
+game nickname and checks that the player is nearby. Guests can use this
+invitation. It can interrupt an autonomous route while preserving the goal.
+You will receive an observation after the approach for a conversational reply.
 To approach a named player, first inspect nearby_players, resolve the requested
 name to an observed exact nickname, then use game.approach(player). game.come
 and game.follow target ONLY the configured owner. Never substitute the owner

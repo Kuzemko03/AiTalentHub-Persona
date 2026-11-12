@@ -127,6 +127,21 @@ class MinecraftTests(unittest.TestCase):
         self.assertIn("не подтвердил", self.app.stop())
         self.assertEqual(self.game.task["state"], "unconfirmed")
 
+    def test_stop_waits_for_native_navigation_and_body_to_be_idle(self):
+        goal = self.entry.getCurrentGoal = Mock(side_effect=[
+            {"active": True}, {"active": False}, {"active": False},
+        ])
+        motion = self.entry.targetKinematics = Mock(side_effect=[
+            {"vx": "0.12", "vy": "0.10", "vz": "0.00", "onGround": "false"},
+            {"vx": "0.00", "vy": "-0.08", "vz": "0.00", "onGround": "true"},
+        ])
+        with patch.object(self.game.shutdown, "wait", return_value=False):
+            result = self.app.stop()
+        self.assertIn("активной игровой задачи нет", result)
+        self.assertEqual(goal.call_count, 3)
+        self.assertEqual(motion.call_count, 2)
+        self.assertIsNone(self.game.task)
+
     def test_stop_with_broken_connection_is_uncertain(self):
         self.entry.stopPathing = Mock(side_effect=OSError("private details"))
         result = self.app.stop()

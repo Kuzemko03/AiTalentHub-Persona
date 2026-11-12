@@ -152,7 +152,7 @@ class Runtime:
                     return
             elif not self.state["enabled"] or not self.state["goal"]:
                 return
-            if now < self.next_tick:
+            if now < self.next_tick or self.app.minecraft.dialogue_pending():
                 return
             self.next_tick = now + max(15, self.app.settings.runtime_interval)
             game = self.app.minecraft.status()
@@ -187,6 +187,7 @@ class Runtime:
         try:
             with self.app.guard:
                 if (revision != self.app.store.get("response_revision", 0)
+                        or self.app.minecraft.dialogue_pending()
                         or not (self.app.errands.ready() if queue_mode else self.state["enabled"])):
                     return
                 if queue_mode:
@@ -251,7 +252,9 @@ class Runtime:
                                  {k: result.get(k) for k in ("x", "y", "z")} if action == "walk" else {})
                     observation = self.app.workplace.execute("game." + action, arguments,
                         actor=actor, owner=True, cancel=cancel, revision=revision, epoch=epoch,
-                        turn_id="autonomy:" + uuid.uuid4().hex)
+                        turn_id="autonomy:" + uuid.uuid4().hex, autonomous=True)
+                    if observation["accepted"] is False:
+                        self.state.pop("pending_action", None)
                     outcome = observation["detail"]
                 if result.get("state") is not None and action != "sleep":
                     self.app.experience.update("minecraft:" + self.app.settings.minecraft_owner.casefold(), result["state"])

@@ -23,15 +23,20 @@ class Workplace:
             and actor == "minecraft:" + self.app.settings.minecraft_owner.casefold())
         return identity and permitted is not False
 
-    def context(self, actor, owner=None):
+    def context(self, actor, owner=None, *, game_turn=None):
         permitted = self.is_owner(actor, owner)
         from .capabilities import implementation
         target = self.app.store.get("channel_target", {}) if actor == "owner" and permitted else {}
         drafts = ([{"id": p["id"], "status": p["status"], "title": json.loads(p["payload"])["title"]}
                    for p in self.app.store.channel_posts(8)] if actor == "owner" and permitted else [])
-        return {"available_tools": [{"name": name, "description": spec[0], "arguments": spec[1]}
-                    for name, spec in TOOLS.items() if (permitted or not spec[2])
-                    and (not name.startswith("channel.") or actor == "owner")],
+        tools = [{"name": name, "description": spec[0], "arguments": spec[1]}
+                 for name, spec in TOOLS.items() if (permitted or not spec[2])
+                 and (not name.startswith("channel.") or actor == "owner")
+                 and (name != "game.approach_speaker" or game_turn is not None)]
+        if game_turn is not None and game_turn.task_id is not None:
+            tools = []
+        return {"available_tools": tools,
+                "game_speaker": self.app.minecraft.speaker_observation(game_turn) if game_turn else None,
                 "implementation": implementation(self.app),
                 "channel": {"connected": bool(target), "title": target.get("title", ""), "drafts": drafts},
                 "guides": GUIDES, "resources": self.app.minecraft.resources,
@@ -45,7 +50,8 @@ class Workplace:
                 or epoch != self.app.minecraft.epoch):
             raise Cancelled("Решение отменено до выполнения.")
 
-    def execute(self, name, arguments, *, actor, owner, cancel, revision, epoch, turn_id, text="", game_task_id=None):
+    def execute(self, name, arguments, *, actor, owner, cancel, revision, epoch, turn_id, text="", game_task_id=None,
+                game_turn=None, autonomous=False):
         spec = TOOLS.get(name)
         if spec is None:
             raise ModelError("Модель запросила неизвестный инструмент.")
@@ -55,15 +61,20 @@ class Workplace:
             raise ModelError("Модель передала неверные параметры инструмента.") from None
         if spec[2] and not self.is_owner(actor, owner):
             raise ModelError("У этого собеседника нет права управления.")
+        if game_turn is not None and game_turn.task_id is not None:
+            raise ModelError("Итог подхода допускает только реплику.")
+        if name == "game.approach_speaker" and (game_turn is None or game_turn.actor != actor or game_turn.epoch != epoch):
+            raise ModelError("Для подхода нужен собеседник из текущего игрового события.")
         if name.startswith("channel.") and actor != "owner":
             raise ModelError("Редакция Telegram доступна только из личного диалога владельца.")
         if name == "role.create" and (not arguments["description"].strip() or arguments["description"] not in text):
             raise ModelError("Описание новой роли должно быть фрагментом текущей просьбы владельца.")
         if name == "game.say" and not arguments["request"].strip():
             raise ModelError("Нужна тема или замысел публичной реплики.")
+        mutation = (spec[2] or name == "game.approach_speaker") and name not in ("game.stop", "game.release")
         with self.app.guard:
             self.check(cancel, revision, epoch)
-            if spec[2] and name not in ("game.stop", "game.release"):
+            if mutation:
                 claimed, previous = self.app.experience.claim_effect(turn_id, actor, name)
                 if not claimed:
                     return {"ok": False, "code": "mutation_not_repeated", "previous": previous,
@@ -90,8 +101,9 @@ class Workplace:
         else:
             with self.app.guard:
                 self.check(cancel, revision, epoch)
-                result = self.dispatch(name, arguments, actor, game_task_id=game_task_id)
-        if spec[2] and name not in ("game.stop", "game.release"):
+                result = self.dispatch(name, arguments, actor, game_task_id=game_task_id,
+                                       game_turn=game_turn, autonomous=autonomous)
+        if mutation:
             self.app.experience.finish_effect(turn_id, result)
         recorded = result
         if name == "memory.search":
@@ -103,7 +115,7 @@ class Workplace:
         self.app.experience.record(event_actor, "workplace", "tool.result", {"name": name, "result": recorded}, turn_id)
         return result
 
-    def dispatch(self, name, arguments, actor, *, game_task_id=None):
+    def dispatch(self, name, arguments, actor, *, game_task_id=None, game_turn=None, autonomous=False):
         if name == "game.observe":
             return self.app.minecraft.observe()
         if name == "game.stop":
@@ -111,6 +123,8 @@ class Workplace:
             return {"reply": reply, "_revision": self.app.store.get("response_revision", 0), "_mask": self.app.active}
         if name == "game.release":
             return self.app.minecraft.release_task()
+        if name == "game.approach_speaker":
+            return self.app.minecraft.execute("approach", player=game_turn.sender, game_turn=game_turn)
         if name == "life.start":
             if not arguments["goal"].strip():
                 raise ModelError("Нужна цель самостоятельной работы.")
@@ -118,7 +132,8 @@ class Workplace:
             reply = self.app.runtime.command("/автономность вкл")
             return {"reply": reply, "_revision": self.app.store.get("response_revision", 0), "_mask": self.app.active}
         if name.startswith("game."):
-            return self.app.minecraft.execute(name.removeprefix("game."), **arguments, task_id=game_task_id)
+            return self.app.minecraft.execute(name.removeprefix("game."), **arguments, task_id=game_task_id,
+                                              autonomous=autonomous)
         if name == "queue.create":
             return self.app.errands.create(**arguments)
         if name == "queue.control":
@@ -144,7 +159,7 @@ class Workplace:
             return {"reply": reply, "_revision": self.app.store.get("response_revision", 0), "_mask": self.app.active}
         raise ModelError("Инструмент недоступен.")
 
-    def run(self, text, messages, *, actor, owner, cancel, revision, epoch, request_id=None):
+    def run(self, text, messages, *, actor, owner, cancel, revision, epoch, request_id=None, game_turn=None):
         if request_id is not None and (not isinstance(request_id, str) or not 1 <= len(request_id) <= 100):
             raise ValueError("Неверный идентификатор обращения.")
         turn_id = actor + ":" + (request_id or uuid.uuid4().hex)
@@ -154,13 +169,14 @@ class Workplace:
         reserved = None
         action_detail = ""
         started = time.monotonic()
+        steps = 1 if game_turn is not None and game_turn.task_id is not None else self.MAX_STEPS
         try:
-            for step in range(self.MAX_STEPS):
+            for step in range(steps):
                 with self.app.guard:
                     self.check(cancel, revision, epoch)
                     mask = dict(self.app.masks[self.app.active])
-                    system = self.app.prompt(actor, mask, text, owner=owner)
-                    if step == self.MAX_STEPS - 1:
+                    system = self.app.prompt(actor, mask, text, owner=owner, game_turn=game_turn)
+                    if step == steps - 1:
                         system += "\nStep budget exhausted: give the final reply with tool=null, using observations already received."
                     call_id = reserved if reserved is not None else self.app.store.reserve_call(self.app.settings.daily_requests)
                     reserved = None
@@ -183,14 +199,14 @@ class Workplace:
                     if type(value) in (int, float):
                         usage[key] = usage.get(key, 0) + value
                 if result["tool"] is None:
-                    if result["state"] is not None and self.is_owner(actor, owner):
+                    if result["state"] is not None and steps > 1 and self.is_owner(actor, owner):
                         validate(result["state"], STATE)
                         with self.app.guard:
                             self.check(cancel, revision, epoch)
                             self.app.experience.update(actor, result["state"])
                     return {**result, **metrics, "usage": usage, "latency": round(latency, 2), "steps": step + 1,
                             "_revision": revision, "_mask": self.app.active, "_turn_id": turn_id}
-                if step == self.MAX_STEPS - 1:
+                if step == steps - 1:
                     raise ModelError("Модель не завершила решение за отведённое число шагов.")
                 tool = result["tool"]
                 signature = json.dumps(tool, sort_keys=True, ensure_ascii=False)
@@ -205,7 +221,7 @@ class Workplace:
                         self.check(cancel, revision, epoch)
                         reserved = self.app.store.reserve_call(self.app.settings.daily_requests)
                 observation = self.execute(tool["name"], tool["arguments"], actor=actor, owner=owner,
-                    cancel=cancel, revision=revision, epoch=epoch, turn_id=turn_id, text=text)
+                    cancel=cancel, revision=revision, epoch=epoch, turn_id=turn_id, text=text, game_turn=game_turn)
                 if tool["name"].startswith("game.") and tool["name"] != "game.observe":
                     action_detail = observation.get("detail", "")
                 if "_revision" in observation:

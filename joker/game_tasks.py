@@ -24,12 +24,23 @@ def total(slots, item):
     return sum(s["count"] for s in slots if s["item"] == item)
 
 
-def owner_distance(entry, owner):
+def visible_player(entry, nickname, max_distance=math.inf):
     for player in entry.getPlayersInfo(64):
-        if str(player.get("name", "")).casefold() == owner.casefold():
+        name = str(player.get("name", ""))
+        if name.casefold() != nickname.casefold():
+            continue
+        try:
             distance = float(player.get("distance", "nan"))
-            return distance if math.isfinite(distance) else float("inf")
-    return float("inf")
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(distance) and 0 <= distance <= max_distance:
+            return name, distance
+    return None
+
+
+def owner_distance(entry, owner):
+    player = visible_player(entry, owner)
+    return player[1] if player else math.inf
 
 
 def advance(service, busy):

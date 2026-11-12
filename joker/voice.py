@@ -225,12 +225,17 @@ class Voice:
     def worker_current(self, expected_session):
         return expected_session is None or expected_session == self.session
 
-    def feed(self, player, pcm, source="game", *, expected_session=None):
+    def feed(self, player, pcm, source="game", *, expected_session=None, game_epoch=None):
         if (self.mode == "tts" or not self.enabled or self.shutdown.is_set() or self.playing or self.app.runtime.sleeping()
                 or not re.fullmatch(r"[A-Za-z0-9_]{3,16}", player)
                 or player.casefold() == self.app.settings.minecraft_bot.casefold()
                 or source != "call" and not self.app.settings.voice_guests and player.casefold() != self.app.settings.minecraft_owner.casefold()
                 or source not in ("game", "call") or not 0 < len(pcm) <= 19200 or len(pcm) % 2):
+            return
+        epoch = None
+        if source == "game":
+            epoch = self.app.minecraft.epoch if game_epoch is None else game_epoch
+        if source == "game" and epoch != self.app.minecraft.epoch:
             return
         now = time.monotonic()
         samples = struct.unpack("<" + "h" * (len(pcm) // 2), pcm)
@@ -238,8 +243,13 @@ class Voice:
         with self.lock:
             if not self.worker_current(expected_session) or not self.enabled or self.mode == "tts" or self.shutdown.is_set():
                 return
+            if source == "game" and epoch != self.app.minecraft.epoch:
+                return
             key = (source, player)
             buf = self.buffers.get(key)
+            if buf is not None and buf["ticket"].epoch != epoch:
+                del self.buffers[key]
+                buf = None
             if rms < 250 and buf is None:
                 if key not in self.preroll and len(self.preroll) >= 4:
                     self.preroll.pop(next(iter(self.preroll)))
@@ -252,8 +262,7 @@ class Voice:
                 prefix, at = self.preroll.pop(key, (b"", 0))
                 prefix = prefix if now - at <= .3 else b""
                 buf = {"pcm": bytearray(prefix), "at": now - len(prefix) / RATE / 2, "last": now,
-                       "ticket": self.ticket(self.app.store.get("response_revision", 0),
-                                             None if source == "call" else self.app.minecraft.epoch)}
+                       "ticket": self.ticket(self.app.store.get("response_revision", 0), epoch)}
                 self.buffers[key] = buf
             if len(buf["pcm"]) + len(pcm) > MAX_PCM:
                 # Drop an overlong utterance as a whole instead of executing a truncated command.
@@ -319,8 +328,8 @@ class Voice:
                         try: self.calls.put_nowait(CallJob(text, ticket))
                         except queue.Full: pass
                 else:
-                    self.app.minecraft.accept({"user": player, "msg": text,
-                        "parse_type": "parsed", "source": "voice"}, voice_ticket=ticket)
+                    self.app.minecraft.accept({"user": player, "msg": text, "parse_type": "parsed"},
+                                              voice_ticket=ticket, expected_epoch=ticket.epoch)
         return True
 
     def call_once(self, expected_session=None):

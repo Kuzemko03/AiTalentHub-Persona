@@ -18,6 +18,12 @@ class ExplorationTests(Fixture):
         self.assertEqual(data["self"]["position"], [10, 64, 10])
         self.assertEqual(data["surface_map"], [{"x": 12, "y": 64, "z": 11, "ground": "grass block"}])
 
+    def test_surface_offsets_use_current_block_at_fractional_position(self):
+        self.entry.targetKinematics = lambda name: {"x": "9,8700", "y": "64,0000", "z": "10,3400"}
+        data = self.app.minecraft.observe()
+        self.assertEqual(data["self"]["position"], [9.87, 64, 10.34])
+        self.assertEqual(data["surface_map"], [{"x": 11, "y": 64, "z": 11, "ground": "grass block"}])
+
     def test_walk_is_not_complete_until_native_arrival_and_idle(self):
         result = self.app.minecraft.execute("walk", x=14, y=64, z=10)
         self.assertFalse(result["completed"])

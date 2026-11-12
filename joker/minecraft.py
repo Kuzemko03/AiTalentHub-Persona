@@ -7,9 +7,11 @@ import socket
 import threading
 import time
 import uuid
+from dataclasses import dataclass, replace
 
 from .backends import Cancelled, ModelError
-from .game_tasks import advance, owner_distance, inventory
+from .game_tasks import advance, owner_distance, inventory, visible_player
+from . import navigation
 
 NICK = re.compile(r"[A-Za-z0-9_]{3,16}\Z")
 STOP = {"стоп", "/stop", "/стоп"}
@@ -17,6 +19,17 @@ CONTROL = {"/mask", "/маска", "/reset", "/сброс", "/roles", "/роли
            "/сон", "/sleep", "/проснись", "/wake", "/заметка", "/note", "/заметки", "/notes",
            "/найди", "/find", "/забудь", "/forget", "/связь", "/link", "/поручения", "/queue", "/голос", "/voice"}
 
+
+@dataclass(frozen=True)
+class GameTurn:
+    sender: str
+    source: str
+    epoch: int
+    task_id: str | None = None
+
+    @property
+    def actor(self):
+        return "minecraft:" + self.sender.casefold()
 
 
 def probe(settings):
@@ -66,6 +79,7 @@ class MinecraftService:
         self.shutdown = threading.Event()
         self.lock = threading.RLock()
         self.messages = queue.Queue(maxsize=16)
+        self.handling_message = False
         self.entry = None
         self.gateway = None
         self.detail = "не подключён"
@@ -101,12 +115,13 @@ class MinecraftService:
             from py4j.java_gateway import JavaGateway, GatewayParameters, CallbackServerParameters
         except ImportError:
             raise ValueError('Для Minecraft установите дополнительный пакет: pip install -e ".[minecraft]"') from None
+        callbacks = GameCallbacks(self)
         gateway = JavaGateway(
             gateway_parameters=GatewayParameters(address="127.0.0.1", port=self.settings.minecraft_port,
                                                  auto_convert=True, read_timeout=3),
             callback_server_parameters=CallbackServerParameters(address="127.0.0.1",
                 port=self.settings.minecraft_callback_port, daemonize=True, daemonize_connections=True),
-            python_server_entry_point=GameCallbacks(self))
+            python_server_entry_point=callbacks)
         try:
             if str(gateway.entry_point.getUsername()).casefold() != self.settings.minecraft_bot.casefold():
                 raise ValueError("Ник игрового клиента не совпадает с MINECRAFT_BOT.")
@@ -118,7 +133,7 @@ class MinecraftService:
                     raise ValueError("Задайте MINECRAFT_SERVER: имя сервера и необязательный порт.")
                 self.next_join = time.monotonic() + 60
                 gateway.entry_point.ConnectToServer(server)
-            self.attach(gateway.entry_point)
+            callbacks.epoch = self.attach(gateway.entry_point)
             address = gateway.jvm.java.net.InetAddress.getByName("127.0.0.1")
             gateway.java_gateway_server.resetCallbackClient(address, self.settings.minecraft_callback_port)
             gateway.entry_point.InitPythonCallback()
@@ -143,6 +158,7 @@ class MinecraftService:
             self.entry = entry
             self.epoch += 1
             self.detail = "подключён через UnionClef"
+            return self.epoch
 
     def detach(self):
         with self.app.guard, self.lock:
@@ -153,46 +169,45 @@ class MinecraftService:
             self.busy = False
             self.task = None  # Never replay a task after reconnect or restart.
             self.detail = "нет связи с UnionClef"
-            while not self.messages.empty():
-                try:
-                    self.messages.get_nowait()
-                except queue.Empty:
-                    break
+            self.discard_messages()
+
+    def discard_messages(self):
+        while True:
+            try:
+                self.messages.get_nowait()
+            except queue.Empty:
+                return
+
+    def dialogue_pending(self):
+        return self.handling_message or not self.messages.empty()
 
     def refresh(self):
         with self.app.guard, self.lock:
             entry = self.entry
             if entry is None or not entry.inGame():
                 raise ValueError("Minecraft не находится в игровом мире.")
-            busy = bool(entry.hasActiveTask())
+            busy = navigation.active(entry)
             self.busy = busy
             if self.task and self.task["kind"] in ("collect", "deliver"):
                 advance(self, busy)
             elif self.task and self.task["kind"] == "walk":
-                from .navigation import refresh
-                refresh(self, busy)
-            elif self.task and self.task["kind"] in ("come", "approach"):
+                navigation.refresh(self, busy)
+            elif self.task and self.task["kind"] == "approach":
+                navigation.refresh_approach(self, busy)
+            elif self.task and self.task["kind"] == "come":
                 target = self.task["target"]
                 distance = owner_distance(entry, target)
                 if self.task.get("state") in ("failed", "unconfirmed", "arrived"):
                     pass
-                elif self.task.get("phase") == "target_lost_stopping":
-                    if not busy:
-                        self.task.update(state="not_arrived", detail="Игрок ушёл из видимости; движение остановлено. Можно выбрать новую цель.")
-                elif self.task["kind"] == "approach" and not math.isfinite(distance):
+                elif time.monotonic() - self.task.get("started_at", time.monotonic()) > 900:
                     entry.stopPathing()
-                    self.task.update(state="running", phase="target_lost_stopping",
-                                     detail="Выбранный игрок больше не виден; проверяется остановка.")
-                elif time.monotonic() - self.task.get("started_at", time.monotonic()) > (90 if self.task["kind"] == "approach" else 900):
-                    entry.stopPathing()
-                    limit = "90 секунд" if self.task["kind"] == "approach" else "15 минут"
-                    self.task.update(state="failed", detail=f"Истекли {limit} ожидания подхода. Проверь игру.")
+                    self.task.update(state="failed", detail="Истекли 15 минут ожидания подхода. Проверь игру.")
                 elif self.task.get("phase") == "stopping":
                     if not busy:
                         if distance <= 3:
                             self.task.update(state="arrived", detail=f"{target} в пределах трёх блоков, движение остановлено.")
                         else:
-                            self.task.update(state="not_arrived" if self.task["kind"] == "approach" else "unconfirmed",
+                            self.task.update(state="unconfirmed",
                                              detail="Игрок отошёл; движение остановлено, прибытие не подтверждено.")
                 elif distance <= 3:
                     entry.stopPathing()
@@ -213,33 +228,35 @@ class MinecraftService:
 
     def release_task(self):
         with self.app.guard, self.lock:
-            previous = (self.task or {}).get("kind")
             if self.task and self.task.get("kind") not in ("follow", "come", "approach", "walk", "stop"):
                 return {"accepted": False, "completed": False,
                         "detail": "Состояние ресурсного поручения требует проверки владельцем. Маршрут не заменён."}
             detail = self._stop_task()
             stopped = self.entry is not None and self.task is None
-            if stopped and self.app.runtime.state.get("pending_action", {}).get("action") == previous:
-                self.app.runtime.state.pop("pending_action", None)
-                self.app.runtime.save()
             return {"accepted": stopped, "completed": stopped, "detail": detail}
 
     def _stop_task(self):
         entry = self.entry
         if entry is None:
             return "Игровое управление пока не подключено."
+        previous = (self.task or {}).get("kind")
         with self.lock:
             self.task = {"kind": "stop", "state": "unconfirmed"}
         try:
             result = entry.stopPathing()
             if not result or not result.get("ok"):
                 return "UnionClef не подтвердил приём остановки."
-            deadline = time.monotonic() + 1.5
+            deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
-                if entry.inGame() and not entry.hasActiveTask():
+                if (entry.inGame() and not navigation.active(entry)
+                        and navigation.stationary(entry, self.settings.minecraft_bot)):
                     with self.lock:
                         self.busy = False
                         self.task = None
+                        pending = self.app.runtime.state.get("pending_action")
+                        if pending and pending.get("action") == previous:
+                            self.app.runtime.state.pop("pending_action")
+                            self.app.runtime.save()
                         self.trace_task()
                     return "UnionClef подтвердил: активной игровой задачи нет."
                 self.shutdown.wait(.1)
@@ -266,19 +283,23 @@ class MinecraftService:
 
     def observe(self):
         result = self.status()
-        if self.entry is None:
+        entry = self.entry
+        if entry is None:
             return result
         try:
-            result["inventory"] = inventory(self.entry)
+            result["inventory"] = inventory(entry)
+        except Exception:
+            result["observation_error"] = "Не все игровые сведения доступны."
+        try:
             players = []
-            for raw in self.entry.getPlayersInfo(64):
+            for raw in entry.getPlayersInfo(64):
                 name = str(raw.get("name", ""))
                 distance = float(raw.get("distance", "nan"))
                 if NICK.fullmatch(name) and math.isfinite(distance) and distance >= 0:
                     player = {"name": name, "distance": round(distance, 2)}
-                    position = str(raw.get("position", ""))
-                    if re.fullmatch(r"-?\d+(?:\.\d+)?,\s*-?\d+(?:\.\d+)?,\s*-?\d+(?:\.\d+)?", position):
-                        player["position"] = [float(v) for v in position.split(",")]
+                    position = navigation.parse_position(str(raw.get("position", "")).split(","))
+                    if position is not None:
+                        player["position"] = position
                     for key in ("hand_item", "ground_block", "gamemode"):
                         value = str(raw.get(key, ""))
                         if value:
@@ -289,14 +310,21 @@ class MinecraftService:
         except Exception:
             result["observation_error"] = "Не все игровые сведения доступны."
         try:
-            from .navigation import surface
-            result["surface_map"] = surface(self.entry, result.get("self"))
+            coordinates = entry.targetKinematics(self.settings.minecraft_bot)
+            position = navigation.parse_position([coordinates[k] for k in ("x", "y", "z")])
+            if position is not None:
+                result["self"] = {**(result.get("self") or {"name": self.settings.minecraft_bot}), "position": position}
+        except Exception:
+            pass  # Older bridges can still supply the rounded position in the player list.
+        try:
+            result["surface_map"] = navigation.surface(entry, result.get("self"))
         except Exception:
             result["surface_map"] = []
         return result
 
     def trace_task(self):
-        task = {k: v for k, v in (self.task or {}).items() if k not in ("started_at", "last_progress_at", "last_position")}
+        task = {k: v for k, v in (self.task or {}).items()
+                if k not in ("started_at", "last_progress_at", "last_position", "best_distance", "stop_requested_at")}
         if task != self._last_task_event:
             self._last_task_event = dict(task)
             self.app.experience.record("world:minecraft", "minecraft", "task.observed", task)
@@ -305,6 +333,12 @@ class MinecraftService:
                 if self.app.runtime.state.get("pending_action", {}).get("action") == task.get("kind"):
                     self.app.runtime.state.pop("pending_action", None)
                     self.app.runtime.save()
+                if task.get("source") and not self.shutdown.is_set():
+                    turn = GameTurn(task["target"], task["source"], self.epoch, task["id"])
+                    try:
+                        self.messages.put_nowait((turn, "", self.app.store.get("response_revision", 0), None))
+                    except queue.Full:
+                        self.event("chat.dropped.queue_full", {"actor": turn.sender})
         if (not task or task.get("state") in ("collected", "arrived", "not_arrived")) and not self.busy:
             self.app.store.set("pending_game_action", None)
         if hasattr(self.app, "errands"):
@@ -345,7 +379,8 @@ class MinecraftService:
             return {"accepted": True, "completed": False, "message": message,
                     "detail": "Реплика передана в очередь игрового чата. Доставка сервером ещё не подтверждена."}
 
-    def execute(self, action, item=None, count=None, *, player=None, x=None, y=None, z=None, task_id=None):
+    def execute(self, action, item=None, count=None, *, player=None, x=None, y=None, z=None, task_id=None,
+                game_turn=None, autonomous=False):
         """Typed bridge operation. No user text, aliases or behavior selection."""
         if action not in ("follow", "come", "collect", "deliver", "approach", "walk"):
             raise ValueError("Неизвестный игровой инструмент.")
@@ -355,8 +390,7 @@ class MinecraftService:
         if action == "approach" and (not isinstance(player, str) or not NICK.fullmatch(player)):
             raise ValueError("Нужен точный игровой ник выбранного игрока.")
         if action == "walk":
-            from .navigation import validate_point
-            validate_point(x, y, z)
+            navigation.validate_point(x, y, z)
         with self.app.guard, self.lock:
             queue = getattr(self.app, "errands", None)
             if queue and queue.owns_game() and (not task_id or task_id != queue.current()["task_id"]
@@ -365,35 +399,48 @@ class MinecraftService:
                         "detail": "Сначала приостанови и отмени список поручений. Отдельное действие не отправлено."}
             if self.entry is None:
                 return {"accepted": False, "completed": False, "detail": "Minecraft не подключён. Поручение не отправлено."}
-            if self.task and self.task.get("state") not in ("collected", "arrived", "not_arrived"):
-                return {"accepted": False, "completed": False,
-                        "detail": "Сначала проверь прежнее поручение и нажми «стоп».", "task": dict(self.task)}
+            if game_turn is not None and (action != "approach" or game_turn.epoch != self.epoch
+                                          or player.casefold() != game_turn.sender.casefold()):
+                raise Cancelled("Подход относится к другому игровому событию.")
+            task_before = self.task
             try:
-                if not self.entry.inGame() or self.entry.hasActiveTask():
-                    return {"accepted": False, "completed": False,
-                            "detail": "Мир закрыт или есть активная задача. Проверь игру и нажми «стоп»; новое поручение не отправлено."}
-                if action == "walk":
-                    from .navigation import start
-                    return start(self, x, y, z, task_id)
                 target = self.settings.minecraft_owner
                 if action == "approach":
-                    visible = {}
-                    for p in self.entry.getPlayersInfo(64):
-                        name = str(p.get("name", ""))
-                        try:
-                            distance = float(p.get("distance", "nan"))
-                        except (TypeError, ValueError):
-                            continue
-                        if NICK.fullmatch(name) and math.isfinite(distance) and 0 <= distance <= 96:
-                            visible[name.casefold()] = name
-                    target = visible.get(player.casefold())
-                    if not target or target.casefold() == self.settings.minecraft_bot.casefold():
+                    visible = visible_player(self.entry, player, navigation.APPROACH_RANGE)
+                    if visible is None or player.casefold() == self.settings.minecraft_bot.casefold():
                         return {"accepted": False, "completed": False,
-                                "detail": f"Игрок {player} не виден рядом. Подход не начат; владелец не подставлялся."}
+                                "detail": f"Для подхода нужен игрок {player} в пределах видимости."}
+                    target, distance = visible
+                if self.task and self.task.get("state") not in ("collected", "arrived", "not_arrived"):
+                    if (game_turn is None or not self.task.get("autonomous")
+                            or self.task["kind"] not in ("walk", "approach")
+                            or self.task["state"] not in ("submitted", "running")):
+                        return {"accepted": False, "completed": False, "detail": "Сначала нужно закончить текущее поручение или нажать «стоп».",
+                                "task": dict(self.task)}
+                    stopped = self.release_task()
+                    if not stopped["completed"]:
+                        return stopped
+                    task_before = self.task
+                    visible = visible_player(self.entry, target, navigation.APPROACH_RANGE)
+                    if visible is None:
+                        return {"accepted": False, "completed": False,
+                                "detail": f"Игрок {target} ушёл из видимости во время остановки."}
+                    target, distance = visible
+                if not self.entry.inGame() or navigation.active(self.entry):
+                    return {"accepted": False, "completed": False,
+                            "detail": "Мир закрыт или есть активная задача. Проверь игру и нажми «стоп»."}
+                if action == "walk":
+                    return navigation.start(self, x, y, z, task_id, autonomous=autonomous)
                 task = {"id": task_id or uuid.uuid4().hex, "kind": action,
                         "target": target, "state": "submitted"}
                 if action in ("come", "approach"):
                     task["started_at"] = time.monotonic()
+                if action == "approach":
+                    task.update(best_distance=distance, last_progress_at=task["started_at"])
+                    if game_turn is not None:
+                        task["source"] = game_turn.source
+                    if autonomous:
+                        task["autonomous"] = True
                 if action in ("collect", "deliver"):
                     task.update(item=item, count=count, phase="collect", started_at=time.monotonic())
                 # Write intent before any bridge side effect; never replay it after restart.
@@ -407,6 +454,9 @@ class MinecraftService:
                 return {"accepted": True, "completed": False, "task": dict(task),
                         "detail": "Поручение передано в UnionClef. Результат ещё не подтверждён."}
             except Exception:
+                if self.task is task_before:
+                    return {"accepted": False, "completed": False,
+                            "detail": "Не удалось получить игровое состояние. Движение не начато."}
                 self.task = {"id": task_id or (self.task or {}).get("id", ""), "kind": "unknown", "state": "unconfirmed"}
                 self.trace_task()
                 return {"accepted": None, "completed": False, "task": dict(self.task),
@@ -423,27 +473,24 @@ class MinecraftService:
         self._callback_times[kind] = now
         self.app.experience.record("world:minecraft", "minecraft", kind, data)
 
-    def accept(self, message, *, voice_ticket=None):
+    def accept(self, message, *, voice_ticket=None, expected_epoch=None):
         """Only typed/parsed chat; never infer the sender from a raw chat string."""
         if self.entry is None or self.shutdown.is_set():
             return
         sender, text = message.get("user"), message.get("msg")
-        if (message.get("parse_type") == "unparsed" or not isinstance(sender, str)
+        if (message.get("parse_type") != "parsed" or not isinstance(sender, str)
                 or not NICK.fullmatch(sender) or not isinstance(text, str) or not 0 < len(text) <= 1000
                 or sender.casefold() == self.settings.minecraft_bot.casefold()):
             return
         with self.app.guard:
-            if voice_ticket is not None and not self.app.voice.current(voice_ticket):
+            if (self.entry is None or expected_epoch is not None and expected_epoch != self.epoch
+                    or voice_ticket is not None and not self.app.voice.current(voice_ticket)):
                 return
             aliases = ("джокер", self.settings.minecraft_bot, self.app.masks[self.app.active]["display_name"])
             revision = self.app.store.get("response_revision", 0)
-        addressed = any(re.search(r"(?<!\w)" + re.escape(a) + r"(?!\w)", text, re.I) for a in aliases)
-        owner = sender.casefold() == self.settings.minecraft_owner.casefold()
-        content = self.strip_address(text)
-        with self.app.guard:
-            if (revision != self.app.store.get("response_revision", 0)
-                    or voice_ticket is not None and not self.app.voice.current(voice_ticket)):
-                return
+            addressed = any(re.search(r"(?<!\w)" + re.escape(a) + r"(?!\w)", text, re.I) for a in aliases)
+            owner = sender.casefold() == self.settings.minecraft_owner.casefold()
+            content = self.strip_address(text) or text
             if owner and content.casefold().rstrip(".!?") in STOP:
                 reply = self.app.stop()  # Priority path: no queue and no model request.
                 self.control_reply(reply)
@@ -457,10 +504,11 @@ class MinecraftService:
                 return
             if not addressed:
                 return
+            turn = GameTurn(sender, "voice" if voice_ticket is not None else "chat", self.epoch)
             try:
-                self.messages.put_nowait((sender, content, owner, revision, self.epoch,
-                                         message.get("source", "chat"), voice_ticket))
-                self.event("chat.queued", {"actor": sender, "source": message.get("source", "chat"), "text": content[:500]})
+                self.messages.put_nowait((turn, content, revision, voice_ticket))
+                self.app.runtime.interrupt()
+                self.event("chat.queued", {"actor": sender, "source": turn.source, "text": content[:500]})
             except queue.Full:
                 self.event("chat.dropped.queue_full", {"actor": sender})
 
@@ -472,48 +520,81 @@ class MinecraftService:
                 except Exception:
                     pass  # A failed chat acknowledgement must not undo the stop itself.
 
+    def followup_task(self, turn):
+        task = self.task
+        if not task or task["id"] != turn.task_id or task["state"] not in ("arrived", "not_arrived"):
+            return None
+        if (not self.entry.inGame() or navigation.active(self.entry)
+                or not navigation.stationary(self.entry, self.settings.minecraft_bot)):
+            return None
+        player = visible_player(self.entry, turn.sender, navigation.APPROACH_RANGE)
+        if player and (task["state"] != "arrived" or player[1] <= navigation.APPROACH_RADIUS):
+            return task
+        return None
+
+    def speaker_observation(self, turn):
+        result = {"nickname": turn.sender, "source": turn.source, "visible": None}
+        if self.entry is None or turn.epoch != self.epoch:
+            return result
+        try:
+            player = visible_player(self.entry, turn.sender, navigation.APPROACH_RANGE)
+        except Exception:
+            return result
+        result["visible"] = player is not None
+        if player is not None:
+            result["distance"] = round(player[1], 2)
+        return result
+
     def work_once(self):
-        try:
-            started = time.monotonic()
-            sender, text, owner, revision, epoch, source, voice_ticket = self.messages.get_nowait()
-        except queue.Empty:
-            return False
+        with self.app.guard:
+            try:
+                turn, text, revision, voice_ticket = self.messages.get_nowait()
+            except queue.Empty:
+                return False
+            self.handling_message = True
+        started = time.monotonic()
+        epoch = turn.epoch
+        owner = self.app.workplace.is_owner(turn.actor)
         token = text.partition(" ")[0].casefold()
-        if token.startswith("/") and token not in CONTROL:
-            return True  # No Telegram/editorial/private-memory commands in a public game.
         try:
+            if token.startswith("/") and (not owner or token not in CONTROL):
+                return True
             with self.app.guard:
                 if (revision != self.app.store.get("response_revision", 0)
                         or self.entry is None or epoch != self.epoch
                         or voice_ticket is not None and not self.app.voice.current(voice_ticket)):
                     return True
-                if owner:
-                    result = self.app.command(text, actor="minecraft:" + sender.casefold(), expected_revision=revision)
-                    if result is not None:
-                        voice_ticket = None  # A confirmed operator command may switch/stop this session itself.
-                    revision = self.app.store.get("response_revision", 0)
-            if not owner:
-                # Guests may converse, but cannot mutate the shared role or run tools.
-                from .roles import role_request
-                if token in CONTROL or role_request(text):
-                    return True
                 result = None
+                if turn.task_id is not None:
+                    task = self.followup_task(turn)
+                    if task is None:
+                        return True
+                    text = json.dumps({"approach_outcome": task["state"], "observation": task["detail"],
+                                       "instruction": "Continue the conversation with the observed speaker in your "
+                                                      "current persona. Write one brief reply based on the outcome."},
+                                      ensure_ascii=False)
+                elif token in CONTROL:
+                    result = self.app.command(text, actor=turn.actor, expected_revision=revision)
+                    voice_ticket = None  # Operator controls may switch or stop the voice session.
+                    revision = self.app.store.get("response_revision", 0)
             if result is None:
-                answer = self.app.reply(text, actor="minecraft:" + sender.casefold(),
+                answer = self.app.reply(text, actor=turn.actor,
                                         expected_revision=revision, owner=owner,
-                                        cancel_event=voice_ticket.cancel if voice_ticket is not None else None)
+                                        cancel_event=voice_ticket.cancel if voice_ticket is not None else None,
+                                        game_turn=turn)
                 result, revision = answer["reply"], answer["_revision"]
                 if answer.get("_transition"):
                     voice_ticket = None
             parts = chat_chunks(result)
             reply = " ".join(parts)
-            if source == "voice":
+            if turn.source == "voice":
                 self.app.voice.metrics["reply_ms"] = round((time.monotonic() - started) * 1000)
             for index, part in enumerate(parts):
                 with self.app.guard, self.lock:
                     if (self.entry is None or epoch != self.epoch or self.shutdown.is_set()
                             or revision != self.app.store.get("response_revision", 0)
-                            or voice_ticket is not None and not self.app.voice.current(voice_ticket)):
+                            or voice_ticket is not None and not self.app.voice.current(voice_ticket)
+                            or turn.task_id is not None and self.followup_task(turn) is None):
                         return True
                     self.entry.ChatMessage(part)
                 if index < len(parts) - 1 and self.shutdown.wait(3):
@@ -521,11 +602,14 @@ class MinecraftService:
             with self.app.guard, self.lock:
                 if (reply and revision == self.app.store.get("response_revision", 0) and epoch == self.epoch
                         and (voice_ticket is None or self.app.voice.current(voice_ticket))):
-                    self.event("reply.submitted", {"actor": sender, "chars": len(reply), "source": source})
+                    self.event("reply.submitted", {"actor": turn.sender, "chars": len(reply), "source": turn.source})
                     self.app.voice.enqueue(reply, revision, epoch, ticket=voice_ticket)
             return True
         except (Cancelled, ModelError, ValueError):
             return True
+        finally:
+            with self.app.guard:
+                self.handling_message = False
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -591,13 +675,14 @@ class GameCallbacks:
     """UnionClef v0.95.61 adris.altoclef.PythonCallback interface."""
     def __init__(self, service):
         self.service = service
+        self.epoch = service.epoch
 
     def isStarted(self):
         return not self.service.shutdown.is_set()
 
     def onVerifedChat(self, message=None):
         if message is not None:
-            self.service.accept({str(k): str(v) for k, v in message.items()})
+            self.service.accept({str(k): str(v) for k, v in message.items()}, expected_epoch=self.epoch)
         return message
 
     def onChatMessage(self, text): return text
@@ -611,7 +696,8 @@ class GameCallbacks:
         self.service.event("damage.confirmed", {"target": str(damaged)[:120], "attacker": str(attacker)[:120], "amount": str(amount)[:32]})
     def onCaptchaSolveRequest(self, image): pass
     def onVoiceFeed(self, player, audio):
-        self.service.app.voice.feed(str(player), bytes(audio))
+        if isinstance(player, str) and self.service.entry is not None and self.epoch == self.service.epoch:
+            self.service.app.voice.feed(player, bytes(audio), game_epoch=self.epoch)
     def agentCommandRequest(self, command): return "not supported"
 
     class Java:

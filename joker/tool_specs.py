@@ -26,6 +26,10 @@ TOOLS = {
     "game.approach": ("Approach a specific currently visible player by their exact observed nickname; stop within 3 blocks. "
                       "Read game.observe to resolve names. Never substitutes the owner for a missing player.",
                       obj({"player": string(16)}), True),
+    "game.approach_speaker": ("When the current Minecraft speaker invites you to come to them, approach that speaker "
+                              "from the chat or voice event and stop nearby. Takes no nickname. May replace an autonomous "
+                              "route; the result is observed separately. Use only for an actual invitation.",
+                              obj(), False),
     "game.say": ("Send one public Minecraft chat message and voice it if voice is enabled. request is a short "
                  "description of what to say, or a creative social brief when the owner delegates wording. "
                  "Do not copy private facts into the brief. A separate writer receives the brief, persona "

@@ -3,7 +3,7 @@ import threading
 from unittest.mock import Mock, patch
 
 from joker.backends import Cancelled, ModelError
-from joker.minecraft import chat_chunks
+from joker.minecraft import GameCallbacks, chat_chunks
 from test_next_stage import Fixture
 from test_workplace import Scripted, answer, tool
 
@@ -14,6 +14,131 @@ class SocialTests(Fixture):
             {"name": "AlexPlayer", "distance": "2"},
             {"name": "ZeusThunderer", "distance": str(distance)},
         ]
+
+    def guest_chat(self, text="Джокер, подойди ко мне.", callbacks=None):
+        callbacks = callbacks or GameCallbacks(self.app.minecraft)
+        callbacks.onVerifedChat({"user": "GuestProbe", "msg": text, "parse_type": "parsed"})
+
+    def guest_nearby(self, distance=20):
+        self.entry.getPlayersInfo = lambda limit: [
+            {"name": "AlexPlayer", "distance": "2"},
+            {"name": "GuestProbe", "distance": str(distance)},
+        ]
+
+    def test_guest_invitation_uses_callback_nick_and_continues_in_current_role(self):
+        self.guest_nearby()
+        model = self.app.backend = Scripted(tool("game.approach_speaker"), answer("Подхожу."),
+                                            answer("Я рядом. Что строишь?"))
+        game = self.app.minecraft
+        self.guest_chat()
+        game.work_once()
+        self.assertEqual(self.entry.chats, [";followPlayer GuestProbe", "Подхожу."])
+        self.assertEqual(game.task["target"], "GuestProbe")
+        self.assertIn('"game_speaker": {"nickname": "GuestProbe", "source": "chat", "visible": true, "distance": 20.0}',
+                      model.calls[0][0])
+        self.assertNotIn('"name": "game.approach"', model.calls[0][0])
+
+        self.app.switch("engineer")
+        self.guest_nearby(2)
+        game.refresh()
+        self.assertTrue(game.messages.empty())
+        game.refresh()
+        self.assertEqual(game.task["state"], "arrived")
+        game.work_once()
+        self.assertEqual(self.entry.chats[-1], "Я рядом. Что строишь?")
+        self.assertIn('"approach_outcome": "arrived"', model.calls[-1][1][-1]["content"])
+        self.assertIn('"id": "engineer"', model.calls[-1][0])
+        self.assertEqual([m["content"] for m in self.app.store.history("minecraft:guestprobe")
+                          if m["role"] == "user"], ["подойди ко мне."])
+
+    def test_speaker_tool_rejects_substituted_nick_and_an_absent_sender(self):
+        game = self.app.minecraft
+        self.guest_nearby()
+        self.app.backend = Scripted(tool("game.approach_speaker", player="AlexPlayer"))
+        self.guest_chat()
+        game.work_once()
+        self.assertIsNone(game.task)
+        self.assertEqual(self.entry.chats, [])
+
+        self.entry.getPlayersInfo = lambda limit: [{"name": "AlexPlayer", "distance": "1"}]
+        self.app.backend = Scripted(tool("game.approach_speaker"), answer("Пока не вижу тебя."))
+        self.guest_chat()
+        game.work_once()
+        self.assertIsNone(game.task)
+        self.assertEqual(self.entry.chats, ["Пока не вижу тебя."])
+
+    def test_guest_speaker_tool_requires_the_current_game_callback(self):
+        self.guest_nearby()
+        game = self.app.minecraft
+        old = GameCallbacks(game)
+        game.detach()
+        game.attach(self.entry)
+        self.guest_chat(callbacks=old)
+        self.assertFalse(game.work_once())
+        self.app.backend = Scripted(tool("game.approach_speaker"))
+        with self.assertRaises(ModelError):
+            self.app.reply("Подойди ко мне.", actor="minecraft:guestprobe", owner=False)
+        self.assertEqual(self.entry.chats, [])
+
+    def test_guest_invitation_interrupts_only_autonomous_social_movement(self):
+        self.guest_nearby()
+        game = self.app.minecraft
+        self.app.runtime.state.update(enabled=True, goal="Исследуй мир", pending_action={"action": "walk"})
+        for kind, autonomous, accepted in (("deliver", True, False), ("walk", False, False), ("walk", True, True)):
+            with self.subTest(kind=kind, autonomous=autonomous):
+                game.task = {"id": "prior", "kind": kind, "state": "running", "autonomous": autonomous}
+                self.entry.active = True
+                self.app.backend = Scripted(tool("game.approach_speaker"), answer())
+                self.guest_chat()
+                game.work_once()
+                self.assertEqual(game.task["kind"], "approach" if accepted else kind)
+                self.assertEqual(self.entry.stop_calls, int(accepted))
+                self.assertTrue(self.app.runtime.state["enabled"])
+        self.assertNotIn("pending_action", self.app.runtime.state)
+        self.assertEqual(self.entry.chats.count(";followPlayer GuestProbe"), 1)
+
+    def test_stop_discards_pending_arrival_reply(self):
+        self.guest_nearby(2)
+        game = self.app.minecraft
+        self.app.backend = Scripted(tool("game.approach_speaker"), answer("Подхожу."))
+        self.guest_chat()
+        game.work_once()
+        game.refresh()
+        game.refresh()
+        self.assertFalse(game.messages.empty())
+        game.accept({"user": "AlexPlayer", "msg": "Стоп", "parse_type": "parsed"})
+        self.assertTrue(game.messages.empty())
+        self.assertIsNone(game.task)
+        self.assertFalse(game.work_once())
+
+    def test_arrival_reply_is_cancelled_if_speaker_leaves_during_generation(self):
+        self.guest_nearby(2)
+        game = self.app.minecraft
+
+        def departed(*args):
+            self.guest_nearby(8)
+            return answer("Я рядом.")
+
+        self.app.backend = Scripted(tool("game.approach_speaker"), answer("Подхожу."), departed)
+        self.guest_chat()
+        game.work_once()
+        game.refresh()
+        game.refresh()
+        game.work_once()
+        self.assertNotIn("Я рядом.", self.entry.chats)
+        self.assertNotIn("Я рядом.", [m["content"] for m in self.app.store.history("minecraft:guestprobe")])
+
+    def test_blocked_approach_recovers_after_verified_stop_even_if_busy(self):
+        self.guest_nearby()
+        game = self.app.minecraft
+        game.execute("approach", player="GuestProbe")
+        self.entry.active = True
+        game.task["last_progress_at"] -= 16
+        game.refresh()
+        self.assertEqual(self.entry.stop_calls, 1)
+        game.refresh()
+        self.assertEqual(game.task["state"], "not_arrived")
+        self.assertIsNone(self.app.store.get("pending_game_action"))
 
     def test_named_approach_never_follows_the_owner_instead(self):
         self.nearby()

@@ -11,8 +11,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import Mock, MagicMock, patch
 
 from joker.backends import ModelError
+from joker.minecraft import GameCallbacks
 from joker.voice import AudioHTTP, read_wav, wav_bytes
 from test_next_stage import Fixture
+from test_workplace import Scripted, answer, tool
 
 
 class VoiceTests(Fixture):
@@ -38,6 +40,24 @@ class VoiceTests(Fixture):
         self.assertEqual(self.voice.speech.qsize(), 1)
         self.assertIn("reply_ms", self.voice.metrics)
 
+    def test_guest_voice_callback_keeps_the_speaker_nick_through_transcription(self):
+        self.settings.voice_guests = True
+        self.entry.getPlayersInfo = lambda limit: [
+            {"name": "AlexPlayer", "distance": "1"},
+            {"name": "GuestProbe", "distance": "12"},
+        ]
+        self.voice.provider.transcribe.return_value = "Джокер, подойди ко мне."
+        model = self.app.backend = Scripted(tool("game.approach_speaker"), answer("Иду."))
+        callback = GameCallbacks(self.app.minecraft)
+        for _ in range(4):
+            callback.onVoiceFeed("GuestProbe", struct.pack("<h", 1200) * 4800)
+        self.voice.flush(time.monotonic() + 1)
+        self.voice.listen_once()
+        self.app.minecraft.work_once()
+        self.assertIn('"game_speaker": {"nickname": "GuestProbe", "source": "voice", "visible": true, "distance": 12.0}',
+                      model.calls[0][0])
+        self.assertEqual(self.entry.chats, [";followPlayer GuestProbe", "Иду."])
+        self.assertEqual(self.voice.speech.qsize(), 1)
     def test_disabled_silence_guests_and_self_do_not_call_stt(self):
         self.voice.feed("AlexPlayer", b"\x00\x00" * 4800)
         self.utterance("Guest")
