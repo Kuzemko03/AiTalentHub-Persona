@@ -18,7 +18,9 @@ jobs:
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends libportaudio2
+          sudo apt-get install -y --no-install-recommends libportaudio2 pulseaudio
+          # The runner has no audio session, but PortAudio initializes PulseAudio on import.
+          pulseaudio --start --exit-idle-time=-1
       - run: python -m pip install -e ".[minecraft,voice,stt]"
       - name: Check Windows PowerShell launchers
         if: runner.os == 'Windows'
