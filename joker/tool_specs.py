@@ -69,10 +69,18 @@ TOOLS = {
                     "current owner's message. A separate profile builder receives only this excerpt and current persona.",
                     obj({"description": string(2000)}), True),
 }
-SCHEMA = obj({"reply": string(8000), "remember": {"type": "array", "items": string(300), "maxItems": 3},
-    "tool": {"anyOf": [{"type": "null"}] + [obj({"name": {"type": "string", "enum": [name]},
-        "arguments": spec[1]}) for name, spec in TOOLS.items()]},
-    "state": {"anyOf": [{"type": "null"}, STATE]}})
+
+
+def dialogue_schema(tool_names):
+    tool_choices = [obj({"name": {"type": "string", "enum": [name]}, "arguments": TOOLS[name][1]})
+                    for name in tool_names]
+    no_tool = {"type": "null"}
+    return obj({"reply": string(8000), "remember": {"type": "array", "items": string(300), "maxItems": 3},
+                "tool": {"anyOf": [no_tool, *tool_choices]} if tool_choices else no_tool,
+                "state": {"anyOf": [{"type": "null"}, STATE]}})
+
+
+SCHEMA = dialogue_schema(TOOLS)
 
 
 def validate(value, schema):

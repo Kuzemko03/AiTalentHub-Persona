@@ -4,7 +4,7 @@ import uuid
 import time
 
 from .backends import Cancelled, ModelError, parse_answer
-from .tool_specs import STATE, TOOLS, validate
+from .tool_specs import STATE, TOOLS, dialogue_schema, validate
 
 
 GUIDES = {"minecraft": "Game actions and verification", "memory": "Memory and visibility",
@@ -23,18 +23,22 @@ class Workplace:
             and actor == "minecraft:" + self.app.settings.minecraft_owner.casefold())
         return identity and permitted is not False
 
+    def available_tools(self, actor, owner, game_turn):
+        if game_turn is not None and game_turn.task_id is not None:
+            return []
+        permitted = self.is_owner(actor, owner)
+        return [name for name, spec in TOOLS.items() if (permitted or not spec[2])
+                and (not name.startswith("channel.") or actor == "owner")
+                and (name != "game.approach_speaker" or game_turn is not None)]
+
     def context(self, actor, owner=None, *, game_turn=None):
         permitted = self.is_owner(actor, owner)
         from .capabilities import implementation
         target = self.app.store.get("channel_target", {}) if actor == "owner" and permitted else {}
         drafts = ([{"id": p["id"], "status": p["status"], "title": json.loads(p["payload"])["title"]}
                    for p in self.app.store.channel_posts(8)] if actor == "owner" and permitted else [])
-        tools = [{"name": name, "description": spec[0], "arguments": spec[1]}
-                 for name, spec in TOOLS.items() if (permitted or not spec[2])
-                 and (not name.startswith("channel.") or actor == "owner")
-                 and (name != "game.approach_speaker" or game_turn is not None)]
-        if game_turn is not None and game_turn.task_id is not None:
-            tools = []
+        tools = [{"name": name, "description": TOOLS[name][0], "arguments": TOOLS[name][1]}
+                 for name in self.available_tools(actor, owner, game_turn)]
         return {"available_tools": tools,
                 "game_speaker": self.app.minecraft.speaker_observation(game_turn) if game_turn else None,
                 "implementation": implementation(self.app),
@@ -170,6 +174,9 @@ class Workplace:
         action_detail = ""
         started = time.monotonic()
         steps = 1 if game_turn is not None and game_turn.task_id is not None else self.MAX_STEPS
+        generation_options = {}
+        if game_turn is not None:
+            generation_options["schema"] = dialogue_schema(self.available_tools(actor, owner, game_turn))
         try:
             for step in range(steps):
                 with self.app.guard:
@@ -181,7 +188,7 @@ class Workplace:
                     call_id = reserved if reserved is not None else self.app.store.reserve_call(self.app.settings.daily_requests)
                     reserved = None
                 try:
-                    raw = self.app.backend.generate(system, messages, cancel)
+                    raw = self.app.backend.generate(system, messages, cancel, **generation_options)
                     if not isinstance(raw, dict):
                         raise ModelError("Модель вернула неверный формат решения.")
                     result = parse_answer(json.dumps({k: raw[k] for k in ("reply", "remember", "tool", "state") if k in raw}, ensure_ascii=False))

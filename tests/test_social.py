@@ -37,6 +37,10 @@ class SocialTests(Fixture):
         self.assertIn('"game_speaker": {"nickname": "GuestProbe", "source": "chat", "visible": true, "distance": 20.0}',
                       model.calls[0][0])
         self.assertNotIn('"name": "game.approach"', model.calls[0][0])
+        schema = model.calls[0][2]["schema"]
+        allowed = [option["properties"]["name"]["enum"][0]
+                   for option in schema["properties"]["tool"]["anyOf"] if option["type"] == "object"]
+        self.assertCountEqual(allowed, ["game.observe", "game.approach_speaker", "memory.search", "instructions.read"])
 
         self.app.switch("engineer")
         self.guest_nearby(2)
@@ -48,6 +52,7 @@ class SocialTests(Fixture):
         self.assertEqual(self.entry.chats[-1], "Я рядом. Что строишь?")
         self.assertIn('"approach_outcome": "arrived"', model.calls[-1][1][-1]["content"])
         self.assertIn('"id": "engineer"', model.calls[-1][0])
+        self.assertEqual(model.calls[-1][2]["schema"]["properties"]["tool"], {"type": "null"})
         self.assertEqual([m["content"] for m in self.app.store.history("minecraft:guestprobe")
                           if m["role"] == "user"], ["подойди ко мне."])
 
@@ -115,7 +120,7 @@ class SocialTests(Fixture):
         self.guest_nearby(2)
         game = self.app.minecraft
 
-        def departed(*args):
+        def departed(*args, **kwargs):
             self.guest_nearby(8)
             return answer("Я рядом.")
 

@@ -25,7 +25,7 @@ class Model:
     def generate(self, system, messages, cancel, **kwargs):
         self.calls += 1
         self.system, self.context = system, json.dumps(messages, ensure_ascii=False)
-        if "schema" in kwargs:
+        if "schema" in kwargs and "reply" not in kwargs["schema"]["properties"]:
             return dict(self.decision)
         return {"reply": "Привет из теста.", "remember": [], "usage": {}, "latency": 0,
                 "model": "test", "backend": "test"}
