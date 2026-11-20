@@ -493,7 +493,8 @@ class MinecraftService:
             content = self.strip_address(text) or text
             if owner and content.casefold().rstrip(".!?") in STOP:
                 reply = self.app.stop()  # Priority path: no queue and no model request.
-                self.control_reply(reply)
+                # Players see a short line; the full diagnostic stays in the panel and logs.
+                self.control_reply("Стою. Всё остановил." if "активной игровой задачи нет" in reply else reply)
                 return
             if owner and content.casefold() in ("/проснись", "/wake"):
                 self.control_reply(self.app.runtime.wake())

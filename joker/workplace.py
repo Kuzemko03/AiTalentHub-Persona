@@ -134,6 +134,8 @@ class Workplace:
                 raise ModelError("Нужна цель самостоятельной работы.")
             self.app.runtime.command("/цель " + arguments["goal"].strip())
             reply = self.app.runtime.command("/автономность вкл")
+            if self.app.runtime.state.get("enabled"):
+                reply = "Хорошо, пойду осмотрюсь."  # A spoken line, not a status report.
             return {"reply": reply, "_revision": self.app.store.get("response_revision", 0), "_mask": self.app.active}
         if name.startswith("game."):
             return self.app.minecraft.execute(name.removeprefix("game."), **arguments, task_id=game_task_id,
