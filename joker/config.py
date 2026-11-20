@@ -28,6 +28,9 @@ class Settings:
     model: str = "gpt-6-luna"
     reasoning: str = "none"
     codex_bin: str = ""
+    claude_model: str = "claude-haiku-5-5"
+    claude_effort: str = "low"
+    claude_bin: str = ""
     timeout: int = 90
     telegram_token: str = ""
     owner_id: int = 0
@@ -75,6 +78,9 @@ class Settings:
                    model=values.get("CODEX_MODEL", "gpt-6-luna"),
                    reasoning=values.get("CODEX_REASONING_EFFORT", "none"),
                    codex_bin=values.get("CODEX_BIN", ""),
+                   claude_model=values.get("CLAUDE_MODEL", "claude-haiku-5-5"),
+                   claude_effort=values.get("CLAUDE_EFFORT", "low"),
+                   claude_bin=values.get("CLAUDE_BIN", ""),
                    timeout=int(values.get("CODEX_TIMEOUT", "90")),
                    telegram_token=values.get("TELEGRAM_BOT_TOKEN", ""),
                    owner_id=int(values.get("TELEGRAM_OWNER_ID") or 0),
@@ -107,3 +113,11 @@ class Settings:
                    voice_mode=values.get("VOICE_MODE", "conversation"),
                    voice_device=values.get("VOICE_OUTPUT_DEVICE", ""),
                    voice_input_device=values.get("VOICE_INPUT_DEVICE", ""))
+
+    @property
+    def active_model(self):
+        return {"codex": self.model, "claude": self.claude_model}.get(self.backend, self.api_model)
+
+    @property
+    def active_reasoning(self):
+        return {"codex": self.reasoning, "claude": self.claude_effort}.get(self.backend)

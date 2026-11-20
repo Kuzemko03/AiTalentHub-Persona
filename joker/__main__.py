@@ -45,14 +45,16 @@ def main():
         return
     if args.mode == "doctor":
         from .minecraft import probe
-        from .backends import CodexBackend
-        try:
-            CodexBackend(settings).executable()
-            codex_found = True
-        except ModelError:
-            codex_found = False
-        print(json.dumps({"backend": settings.backend, "model": settings.model,
-                          "codex_found": codex_found,
+        from .backends import ClaudeBackend, CodexBackend
+        found = {}
+        for name, backend in (("codex_found", CodexBackend), ("claude_found", ClaudeBackend)):
+            try:
+                backend(settings).executable()
+                found[name] = True
+            except ModelError:
+                found[name] = False
+        print(json.dumps({"backend": settings.backend, "model": settings.active_model,
+                          "reasoning": settings.active_reasoning, **found,
                           "telegram_token_configured": bool(settings.telegram_token),
                           "owner_configured": bool(settings.owner_id),
                           "panel": f"http://127.0.0.1:{settings.panel_port}",

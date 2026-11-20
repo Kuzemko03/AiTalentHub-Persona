@@ -5,7 +5,7 @@ def implementation(app):
     s = app.settings
     return {
         "runtime": "Own Python runtime with typed model-selected tools",
-        "text_model": {"backend": s.backend, "model": s.model if s.backend == "codex" else s.api_model},
+        "text_model": {"backend": s.backend, "model": s.active_model},
         "memory": "SQLite; common history across roles, separate private/game/call scopes",
         "minecraft": "Minecraft client with UnionClef, Py4J, parsed chat and player-tagged voice",
         "stt": {"backend": s.stt_backend, "model": s.stt_model, "language": s.stt_language,
